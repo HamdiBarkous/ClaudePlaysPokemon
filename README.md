@@ -9,9 +9,9 @@ A minimal implementation of Claude playing Pokemon Red using the PyBoy emulator.
 ## Setup
 
 1. Clone this repository
-2. Install the required packages:
+2. Install the required packages with [uv](https://docs.astral.sh/uv/):
    ```
-   pip install -r requirements.txt
+   uv sync
    ```
 3. Set up your Anthropic API key as an environment variable:
    ```
@@ -25,7 +25,7 @@ A minimal implementation of Claude playing Pokemon Red using the PyBoy emulator.
 Run the main script:
 
 ```
-python main.py
+uv run main.py
 ```
 
 Optional arguments:
@@ -36,7 +36,7 @@ Optional arguments:
 
 Example:
 ```
-python main.py --rom pokemon.gb --steps 20 --display --sound
+uv run main.py --rom pokemon.gb --steps 20 --display --sound
 ```
 
 ## Implementation Details
