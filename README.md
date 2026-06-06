@@ -13,9 +13,9 @@ A minimal implementation of Claude playing Pokemon Red using the PyBoy emulator.
    ```
    uv sync
    ```
-3. Set up your Anthropic API key as an environment variable:
+3. Set up your OpenRouter API key as an environment variable:
    ```
-   export ANTHROPIC_API_KEY=your_api_key_here
+   export OPENROUTER_API_KEY=your_api_key_here
    ```
 
 4. Place your Pokemon Red ROM file in the root directory (you need to provide your own ROM)

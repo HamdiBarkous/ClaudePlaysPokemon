@@ -5,7 +5,8 @@ description = "A minimal implementation of Claude playing Pokemon Red using the 
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "anthropic>=0.39.0",
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
     "pyboy==2.2.0",
     "pillow",
     "numpy>=1.26,<2",
