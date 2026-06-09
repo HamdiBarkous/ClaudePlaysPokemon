@@ -1,10 +1,11 @@
-# Claude Plays Pokemon - Starter Version
+# Pokemon Agent
 
-A minimal implementation of Claude playing Pokemon Red using the PyBoy emulator. This starter version includes:
+An LLM agent that plays Pokemon Red through the PyBoy emulator, built with LangGraph on top of OpenRouter (OpenAI-compatible). Features:
 
-- Simple agent that uses Claude to play Pokemon Red
-- Memory reading functionality to extract game state information
-- Basic emulator control through Claude's function calling
+- ReAct-style LangGraph agent that sees the game screen and presses buttons via tool calls
+- Memory reading functionality to extract game state information (party, inventory, dialog, collision map)
+- Automatic history summarization to manage context size
+- Jinja2 prompt templates and pydantic-settings configuration
 
 ## Setup
 
@@ -13,9 +14,9 @@ A minimal implementation of Claude playing Pokemon Red using the PyBoy emulator.
    ```
    uv sync
    ```
-3. Set up your OpenRouter API key as an environment variable:
+3. Create a `.env` file with your OpenRouter API key:
    ```
-   export OPENROUTER_API_KEY=your_api_key_here
+   OPENROUTER_API_KEY=your_api_key_here
    ```
 
 4. Place your Pokemon Red ROM file in the root directory (you need to provide your own ROM)
@@ -25,32 +26,62 @@ A minimal implementation of Claude playing Pokemon Red using the PyBoy emulator.
 Run the main script:
 
 ```
-uv run main.py
+uv run main.py --rom "Pokemon Red.gb"
 ```
 
 Optional arguments:
-- `--rom`: Path to the Pokemon ROM file (default: `pokemon.gb` in the root directory)
+- `--rom`: Path to the Pokemon ROM file (default: `Pokemon Red.gb` in the root directory)
 - `--steps`: Number of agent steps to run (default: 10)
 - `--display`: Run with display (not headless)
 - `--sound`: Enable sound (only applicable with display)
+- `--max-history`: Messages in history before summarization (default: 30)
+- `--load-state`: Path to a saved emulator state to load
 
 Example:
 ```
-uv run main.py --rom pokemon.gb --steps 20 --display --sound
+uv run main.py --rom "Pokemon Red.gb" --steps 20 --display --sound
+```
+
+## Configuration
+
+Settings load from environment variables / `.env` (see `src/pokemon_agent/core/settings.py`), e.g.:
+
+```
+OPENROUTER_API_KEY=...
+GAME_MODEL=google/gemini-3.1-flash-lite
+SUMMARIZER_MODEL=          # empty = use GAME_MODEL
+TEMPERATURE=1.0
+THINKING=none              # none|minimal|low|medium|high (OpenRouter reasoning effort)
+USE_NAVIGATOR=false        # expose the navigate_to pathfinding tool
 ```
 
 ## Implementation Details
 
-### Components
+### Structure
 
-- `agent/simple_agent.py`: Main agent class that uses Claude to play Pokemon
-- `agent/emulator.py`: Wrapper around PyBoy with helper functions
-- `agent/memory_reader.py`: Extracts game state information from emulator memory
+```
+prompts/
+├── system/game_player.j2        # gameplay system prompt
+└── human/                       # summarization prompts
+src/pokemon_agent/
+├── core/
+│   ├── settings.py              # pydantic-settings configuration
+│   └── llm.py                   # OpenRouter LLM factory (retry, reasoning control)
+├── agent/
+│   ├── graph.py                 # LangGraph ReAct loop (agent → tools → summarize)
+│   ├── state.py                 # graph state
+│   ├── prompt_manager.py        # Jinja2 + frontmatter prompt loading
+│   ├── vision_tool_node.py      # ToolNode that emits multimodal tool results
+│   └── tools/                   # press_buttons, navigate_to
+└── emulator/
+    ├── emulator.py              # PyBoy wrapper (buttons, collision map, A* pathfinding)
+    └── memory_reader.py         # game state extraction from emulator memory
+```
 
 ### How It Works
 
-1. The agent captures a screenshot from the emulator
-2. It reads the game state information from memory
-3. It sends the screenshot and game state to Claude
-4. Claude responds with explanations and emulator commands
-5. The agent executes the commands and repeats the process
+1. The agent (LLM) decides on an action and calls the `press_buttons` tool
+2. The tool executes the button presses on the emulator
+3. The tool result carries a screenshot, memory-derived game state, and a collision map back to the model in a single multimodal tool message
+4. When the conversation grows past `--max-history` messages, a summarize node condenses it and play continues
+5. The loop ends after `--steps` agent turns

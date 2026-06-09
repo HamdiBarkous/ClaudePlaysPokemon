@@ -4,7 +4,7 @@ import pickle
 from collections import deque
 import heapq
 
-from agent.memory_reader import PokemonRedReader, StatusCondition
+from pokemon_agent.emulator.memory_reader import PokemonRedReader, StatusCondition
 from PIL import Image
 from pyboy import PyBoy
 

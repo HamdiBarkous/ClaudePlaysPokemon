@@ -2,7 +2,9 @@ import argparse
 import logging
 import os
 
-from agent.simple_agent import SimpleAgent
+from pokemon_agent.agent import build_game_graph, build_initial_messages
+from pokemon_agent.core import get_settings
+from pokemon_agent.emulator import Emulator
 
 # Set up logging
 logging.basicConfig(
@@ -13,77 +15,97 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Claude Plays Pokemon - Starter Version")
+    settings = get_settings()
+
+    parser = argparse.ArgumentParser(description="Pokemon Agent")
     parser.add_argument(
-        "--rom", 
-        type=str, 
-        default="pokemon.gb",
-        help="Path to the Pokemon ROM file"
+        "--rom",
+        type=str,
+        default=settings.rom_path,
+        help="Path to the Pokemon ROM file",
     )
     parser.add_argument(
-        "--steps", 
-        type=int, 
-        default=10, 
-        help="Number of agent steps to run"
+        "--steps",
+        type=int,
+        default=settings.max_steps,
+        help="Number of agent steps to run",
     )
     parser.add_argument(
-        "--display", 
-        action="store_true", 
-        help="Run with display (not headless)"
+        "--display",
+        action="store_true",
+        help="Run with display (not headless)",
     )
     parser.add_argument(
-        "--sound", 
-        action="store_true", 
-        help="Enable sound (only applicable with display)"
+        "--sound",
+        action="store_true",
+        help="Enable sound (only applicable with display)",
     )
     parser.add_argument(
-        "--max-history", 
-        type=int, 
-        default=30, 
-        help="Maximum number of messages in history before summarization"
+        "--max-history",
+        type=int,
+        default=settings.max_history,
+        help="Maximum number of messages in history before summarization",
     )
     parser.add_argument(
-        "--load-state", 
-        type=str, 
-        default=None, 
-        help="Path to a saved state to load"
+        "--load-state",
+        type=str,
+        default=None,
+        help="Path to a saved state to load",
     )
-    
+
     args = parser.parse_args()
-    
+
     # Get absolute path to ROM
     if not os.path.isabs(args.rom):
         rom_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), args.rom)
     else:
         rom_path = args.rom
-    
+
     # Check if ROM exists
     if not os.path.exists(rom_path):
         logger.error(f"ROM file not found: {rom_path}")
         print("\nYou need to provide a Pokemon Red ROM file to run this program.")
         print("Place the ROM in the root directory or specify its path with --rom.")
         return
-    
-    # Create and run agent
-    agent = SimpleAgent(
-        rom_path=rom_path,
+
+    emulator = Emulator(
+        rom_path,
         headless=not args.display,
         sound=args.sound if args.display else False,
-        max_history=args.max_history,
-        load_state=args.load_state,
     )
-    
+    emulator.initialize()
+    if args.load_state:
+        logger.info(f"Loading saved state from {args.load_state}")
+        emulator.load_state(args.load_state)
+
+    graph = build_game_graph()
+
+    initial_state = {
+        "messages": build_initial_messages(),
+        "emulator": emulator,
+        "max_steps": args.steps,
+        "max_history": args.max_history,
+        "step_count": 0,
+    }
+
     try:
         logger.info(f"Starting agent for {args.steps} steps")
-        steps_completed = agent.run(num_steps=args.steps)
-        logger.info(f"Agent completed {steps_completed} steps")
+        final_state = graph.invoke(
+            initial_state,
+            # Each step is an agent + tools transition, plus occasional summarize
+            config={"recursion_limit": args.steps * 3 + 10},
+        )
+        logger.info(f"Agent completed {final_state.get('step_count', 0)} steps")
     except KeyboardInterrupt:
         logger.info("Received keyboard interrupt, stopping")
     except Exception as e:
         logger.error(f"Error running agent: {e}")
+        raise
     finally:
-        agent.stop()
+        emulator.stop()
+
 
 if __name__ == "__main__":
     main()
