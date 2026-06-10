@@ -35,7 +35,8 @@ Optional arguments:
 - `--display`: Run with display (not headless)
 - `--sound`: Enable sound (only applicable with display)
 - `--max-history`: Messages in history before summarization (default: 30)
-- `--load-state`: Path to a saved emulator state to load
+- `--state`: Save-state path (default: `game.state`) — the game auto-saves here on exit and auto-resumes from it on launch
+- `--new-game`: Start a fresh game instead of resuming the saved state
 
 Example:
 ```

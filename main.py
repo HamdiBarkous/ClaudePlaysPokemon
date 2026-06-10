@@ -57,10 +57,15 @@ def main():
         help="Maximum number of messages in history before summarization",
     )
     parser.add_argument(
-        "--load-state",
+        "--state",
         type=str,
-        default=None,
-        help="Path to a saved state to load",
+        default="game.state",
+        help="Path where the game state is resumed from and saved to",
+    )
+    parser.add_argument(
+        "--new-game",
+        action="store_true",
+        help="Start a fresh game instead of resuming the saved state",
     )
 
     args = parser.parse_args()
@@ -78,21 +83,27 @@ def main():
         print("Place the ROM in the root directory or specify its path with --rom.")
         return
 
+    # Resolve the save-state path next to this file (like the ROM)
+    if not os.path.isabs(args.state):
+        state_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), args.state)
+    else:
+        state_path = args.state
+
     emulator = Emulator(
         rom_path,
         headless=not args.display,
         sound=args.sound if args.display else False,
     )
     emulator.initialize()
-    if args.load_state:
-        logger.info(f"Loading saved state from {args.load_state}")
-        emulator.load_state(args.load_state)
+    if not args.new_game and os.path.exists(state_path):
+        logger.info(f"Resuming saved game from {state_path}")
+        emulator.load_state(state_path)
 
     graph = build_game_graph()
     speaker = create_speaker(settings)
 
     initial_state = {
-        "messages": build_initial_messages(),
+        "messages": build_initial_messages(emulator),
         "emulator": emulator,
         "speaker": speaker,
         "max_steps": args.steps,
@@ -119,6 +130,11 @@ def main():
         logger.error(f"Error running agent: {e}")
         raise
     finally:
+        try:
+            emulator.save_state(state_path)
+            logger.info(f"Saved game state to {state_path}")
+        except Exception as e:
+            logger.error(f"Failed to save game state: {e}")
         speaker.stop()
         emulator.stop()
 

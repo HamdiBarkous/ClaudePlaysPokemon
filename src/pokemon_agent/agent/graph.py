@@ -27,11 +27,31 @@ from pokemon_agent.emulator import get_screenshot_data_url
 logger = logging.getLogger(__name__)
 
 
-def build_initial_messages() -> list:
-    """Build the seed conversation: system prompt + kickoff message."""
+def build_initial_messages(emulator=None) -> list:
+    """Build the seed conversation: system prompt + kickoff message.
+
+    When an emulator is given, the kickoff includes the current screenshot and
+    memory state so the model starts with eyes open — essential when resuming
+    a saved game mid-playthrough.
+    """
+    if emulator is None:
+        kickoff_content = "You may now begin playing."
+    else:
+        kickoff_content = [
+            {
+                "type": "text",
+                "text": "You may now begin playing. Here is the current game "
+                "screen and state:",
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": get_screenshot_data_url(emulator, upscale=2)},
+            },
+            {"type": "text", "text": emulator.get_state_from_memory()},
+        ]
     return [
         SystemMessage(content=PromptManager.get_system_prompt("game_player")),
-        HumanMessage(content="You may now begin playing."),
+        HumanMessage(content=kickoff_content),
     ]
 
 

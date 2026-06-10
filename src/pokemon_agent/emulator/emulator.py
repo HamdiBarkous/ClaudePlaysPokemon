@@ -99,6 +99,15 @@ class Emulator:
         """
         self._run_on_pyboy(lambda: self.pyboy.load_state(open(state_filename, "rb")))
 
+    def save_state(self, state_filename):
+        """Save the current emulator state to a file."""
+
+        def impl():
+            with open(state_filename, "wb") as f:
+                self.pyboy.save_state(f)
+
+        self._run_on_pyboy(impl)
+
     def press_buttons(self, buttons, wait=True):
         """Press a sequence of buttons on the Game Boy.
         
