@@ -204,6 +204,7 @@ def route_after_tools(state: GameAgentState) -> Literal["agent", "summarize", "_
 def build_game_graph(
     model: BaseChatModel | None = None,
     summarizer: BaseChatModel | None = None,
+    session_id: str | None = None,
 ):
     """Build the gameplay ReAct graph.
 
@@ -211,13 +212,17 @@ def build_game_graph(
         model: The gameplay LLM. Defaults to get_llm() with settings.game_model.
         summarizer: The summarization LLM (no tools). Defaults to
             settings.summarizer_model (falling back to the game model).
+        session_id: OpenRouter session id grouping this run's requests in the
+            dashboard (cost per run). Used only for default-built LLMs.
 
     Returns:
         Compiled StateGraph for gameplay.
     """
     settings = get_settings()
-    model = model or get_llm()
-    summarizer = summarizer or get_llm(settings.resolved_summarizer_model)
+    model = model or get_llm(session_id=session_id)
+    summarizer = summarizer or get_llm(
+        settings.resolved_summarizer_model, session_id=session_id
+    )
 
     tools = [press_buttons]
     if settings.use_navigator:

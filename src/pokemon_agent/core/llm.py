@@ -266,6 +266,7 @@ def _get_rate_limiter() -> InMemoryRateLimiter | None:
 def get_llm(
     model_name: str | None = None,
     thinking: ThinkingLevel | None = None,
+    session_id: str | None = None,
     **kwargs,
 ) -> BaseChatModel:
     """Create an LLM instance via OpenRouter.
@@ -275,6 +276,9 @@ def get_llm(
                    Defaults to settings.game_model.
         thinking: Thinking level for reasoning control. Defaults to settings.thinking.
                  "none" disables thinking; "minimal"/"low"/"medium"/"high" set the level.
+        session_id: Optional OpenRouter session id for observability — groups
+                   all requests of one run together in the dashboard so the
+                   total cost per run is visible.
         **kwargs: Additional arguments passed to the LLM constructor.
 
     Returns:
@@ -298,6 +302,9 @@ def get_llm(
         media_resolution = _MEDIA_RESOLUTION_ENUM.get(settings.media_resolution)
         if media_resolution:
             extra_body["media_resolution"] = media_resolution
+
+    if session_id:
+        extra_body["session_id"] = session_id
 
     return RobustChatOpenAI(
         model=resolved_model,

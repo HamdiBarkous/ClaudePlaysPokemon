@@ -8,10 +8,14 @@ Resume from the most recent save in states/ (the default):
 
     uv run main.py --rom "Pokemon Red.gb" --steps 50 --display
 
+Resume from a specific save (branch from any point in history):
+
+    uv run main.py --rom "Pokemon Red.gb" --steps 50 --display --state states/game-007.state
+
 Every run saves a new states/game-NNN.state on exit (including Ctrl-C), so
-history accumulates and any save can be branched from later with
---state states/game-007.state. Game sound is off unless you pass --sound;
-silence the TTS voice too with TTS_ENGINE=none. Drop --display for headless.
+history accumulates and no save is ever overwritten. Game sound is off unless
+you pass --sound; silence the TTS voice too with TTS_ENGINE=none. Drop
+--display for headless.
 """
 
 import argparse
@@ -20,6 +24,7 @@ import logging
 import os
 import re
 import signal
+from datetime import datetime
 
 # `kill -USR1 <pid>` dumps all thread stacks — for diagnosing a stuck run
 faulthandler.register(signal.SIGUSR1)
@@ -161,7 +166,12 @@ def main():
         logger.info(f"Resuming saved game from {load_path}")
         emulator.load_state(load_path)
 
-    graph = build_game_graph()
+    # One OpenRouter session per run: the dashboard groups these requests so
+    # the total cost of this run is visible at a glance
+    session_id = f"pokemon-{datetime.now().strftime('%m%d_%H%M%S')}"
+    logger.info(f"OpenRouter session: {session_id}")
+
+    graph = build_game_graph(session_id=session_id)
     speaker = create_speaker(settings)
 
     initial_state = {
