@@ -48,12 +48,29 @@ def agent_node(state: GameAgentState, model_with_tools: BaseChatModel) -> dict:
     for tool_call in response.tool_calls or []:
         logger.info(f"[Tool] Using tool: {tool_call['name']}")
 
-    # A step is an agent turn that takes an action
+    # A step is an agent turn that takes an action. A turn with a tool call
+    # also resets the consecutive no-tool-call counter.
     step_count = state.get("step_count", 0)
+    nudge_count = state.get("nudge_count", 0)
     if response.tool_calls:
         step_count += 1
+        nudge_count = 0
 
-    return {"messages": [response], "step_count": step_count}
+    return {"messages": [response], "step_count": step_count, "nudge_count": nudge_count}
+
+
+def nudge_node(state: GameAgentState) -> dict:
+    """Tell the model its last reply did nothing because it called no tool.
+
+    tool_choice="any" should make this unreachable, but providers don't always
+    honor forced tool use (and replies can be truncated mid tool call).
+    """
+    nudge_count = state.get("nudge_count", 0) + 1
+    logger.warning(f"[Agent] Reply had no tool call, nudging ({nudge_count})...")
+    return {
+        "messages": [HumanMessage(content=PromptManager.get_human_prompt("nudge_no_tool"))],
+        "nudge_count": nudge_count,
+    }
 
 
 def summarize_node(state: GameAgentState, summarizer: BaseChatModel) -> dict:
@@ -113,11 +130,17 @@ def summarize_node(state: GameAgentState, summarizer: BaseChatModel) -> dict:
 # =============================================================================
 
 
-def route_after_agent(state: GameAgentState) -> Literal["tools", "__end__"]:
-    """Execute tool calls if the model made any, otherwise end."""
+def route_after_agent(state: GameAgentState) -> Literal["tools", "nudge", "__end__"]:
+    """Execute tool calls if the model made any, otherwise nudge it to act.
+
+    Gives up (END) after settings.max_nudges consecutive tool-less replies so a
+    model that refuses to act can't loop forever.
+    """
     messages = state.get("messages", [])
     if messages and getattr(messages[-1], "tool_calls", None):
         return "tools"
+    if state.get("nudge_count", 0) < get_settings().max_nudges:
+        return "nudge"
     return END
 
 
@@ -168,13 +191,14 @@ def build_game_graph(
     workflow.add_node("agent", lambda state: agent_node(state, model_with_tools))
     workflow.add_node("tools", VisionToolNode(tools))
     workflow.add_node("summarize", lambda state: summarize_node(state, summarizer))
+    workflow.add_node("nudge", nudge_node)
 
     workflow.set_entry_point("agent")
 
     workflow.add_conditional_edges(
         "agent",
         route_after_agent,
-        {"tools": "tools", END: END},
+        {"tools": "tools", "nudge": "nudge", END: END},
     )
     workflow.add_conditional_edges(
         "tools",
@@ -182,5 +206,6 @@ def build_game_graph(
         {"agent": "agent", "summarize": "summarize", END: END},
     )
     workflow.add_edge("summarize", "agent")
+    workflow.add_edge("nudge", "agent")
 
     return workflow.compile()

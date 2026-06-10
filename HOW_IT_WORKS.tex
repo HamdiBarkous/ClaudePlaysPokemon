@@ -1,0 +1,434 @@
+% HOW_IT_WORKS.tex — full architecture tour of the Pokemon agent
+% Build with: latexmk -xelatex HOW_IT_WORKS.tex
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage{fontspec}
+\setmonofont{DejaVu Sans Mono}[Scale=0.85]
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{parskip}
+\usepackage{xcolor}
+\usepackage[colorlinks=true, linkcolor=blue!60!black, urlcolor=blue!60!black]{hyperref}
+
+\titleformat{\section}{\Large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{1em}{}
+
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{\textbf{How This Project Works}\\\large The Complete Tour of the Pokémon-Playing AI Agent}
+\author{}
+\date{June 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\noindent This document explains everything: what the program does, how the AI ``sees'' and ``plays'' the game, what each piece of code is responsible for, and what actually happens step by step when you run it. No prior knowledge of the codebase is assumed.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% =====================================================================
+\section{The Big Picture}
+
+This project makes an AI language model (LLM) play \textbf{Pokémon Red} by itself.
+
+Think of it like this: imagine you are playing Pokémon over a video call with a friend. Your friend cannot touch the Game Boy --- they can only:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Look} at a photo of the screen you send them,
+  \item \textbf{Read} a little cheat-sheet you write for them (``you're in Pallet Town, you have \$3000, no Pokémon yet, there's a dialog box open\ldots''),
+  \item \textbf{Tell you} which buttons to press (``press A twice, then walk up'').
+\end{enumerate}
+
+You press the buttons for them, take a new photo, write a new cheat-sheet, and send it back. Repeat forever.
+
+In this project:
+
+\begin{itemize}[nosep]
+  \item The ``friend'' is \textbf{Gemini Flash Lite} (an LLM, called through OpenRouter).
+  \item ``You'' (the one holding the Game Boy) is the \textbf{Python program}.
+  \item The Game Boy itself is \textbf{PyBoy}, a Game Boy emulator that runs the actual Pokémon Red ROM file on your computer.
+\end{itemize}
+
+One full exchange --- \emph{model looks $\rightarrow$ model decides $\rightarrow$ buttons get pressed $\rightarrow$ new screenshot taken} --- is called a \textbf{step}. You choose how many steps to run:
+
+\begin{verbatim}
+uv run main.py --rom "Pokemon Red.gb" --steps 20
+\end{verbatim}
+
+% =====================================================================
+\section{The Cast of Characters (the Modules)}
+
+\begin{verbatim}
+pokemon/
+|- main.py                          <- entry point: wires everything, starts the loop
+|- prompts/                         <- the "instructions" given to the AI (Jinja)
+|  |- system/game_player.j2         <- "You are playing Pokemon Red..."
+|  |- human/summarize_request.j2    <- "Please summarize your progress..."
+|  `- human/summary_handoff.j2      <- "Here is your summary, continue playing..."
+`- src/pokemon_agent/
+   |- core/
+   |  |- settings.py                <- all configuration (model name, temperature...)
+   |  `- llm.py                     <- builds the connection to the AI model
+   |- agent/
+   |  |- graph.py                   <- THE BRAIN WIRING: the loop logic (LangGraph)
+   |  |- state.py                   <- the shared "memory" of the loop
+   |  |- tools/press_buttons.py     <- the AI's "hands" (button presses)
+   |  |- tools/navigate_to.py       <- optional auto-walking tool (off by default)
+   |  |- vision_tool_node.py        <- makes screenshots visible to the AI
+   |  `- prompt_manager.py          <- loads & renders the prompt templates
+   `- emulator/
+      |- emulator.py                <- wraps PyBoy: buttons, screenshots, maps
+      |- memory_reader.py           <- reads the game's RAM and decodes it
+      `- screenshot.py              <- converts screen images to base64 text
+\end{verbatim}
+
+A quick one-liner for each:
+
+\begin{tabularx}{\textwidth}{@{}lX@{}}
+\toprule
+\textbf{Piece} & \textbf{In plain words} \\
+\midrule
+\code{main.py} & ``Start the Game Boy, build the brain, run $N$ steps.'' \\
+\code{settings.py} & A single place for every knob (which model, how hot, how many steps\ldots). Reads your \code{.env} file. \\
+\code{llm.py} & Creates the phone line to Gemini via OpenRouter, with retry logic for when the line is bad. \\
+\code{graph.py} & The flowchart the program follows: think $\rightarrow$ act $\rightarrow$ observe $\rightarrow$ repeat $\rightarrow$ summarize when memory is full. \\
+\code{state.py} & The clipboard everyone shares: message history, step counter, the emulator itself. \\
+\code{tools/} & The two actions the AI is allowed to take. \\
+\code{vision\_tool\_node.py} & The trick that lets the AI literally \emph{see} screenshots inside tool results. \\
+\code{emulator.py} & Knows how to press buttons, take screenshots, and build the collision map. \\
+\code{memory\_reader.py} & Knows \emph{where in the Game Boy's RAM} the game stores money, party, dialog\ldots\ and decodes it. \\
+\bottomrule
+\end{tabularx}
+
+% =====================================================================
+\section{How the AI ``Sees'' the Game}
+
+The AI never touches pixels or RAM directly. After every action, the program builds an \textbf{observation} with three parts (see \code{agent/tools/\_observation.py}):
+
+\subsection{The Screenshot}
+
+PyBoy exposes the current screen as an image. We:
+\begin{enumerate}[nosep]
+  \item Grab it (\code{emulator.get\_screenshot()} $\rightarrow$ a $160\times144$ pixel image),
+  \item Double its size ($320\times288$ --- small images are hard for vision models),
+  \item Encode it as a \textbf{base64 data URL} --- literally the image converted into a long text string like \code{data:image/png;base64,iVBORw0KGg...}. LLM APIs only accept text/JSON, so images always travel as text.
+\end{enumerate}
+
+\subsection{The Memory Cheat-Sheet}
+
+The Game Boy stores everything about the game in its RAM, and for a famous game like Pokémon Red, fans have documented \textbf{exactly which RAM address holds what}. \code{memory\_reader.py} is a big collection of those addresses plus decoders. Examples:
+
+\begin{tabularx}{\textwidth}{@{}llX@{}}
+\toprule
+\textbf{RAM address} & \textbf{Contains} & \textbf{Quirk} \\
+\midrule
+\code{0xD349} & Your money & Stored in ``Binary Coded Decimal'' --- each half-byte is one decimal digit \\
+\code{0xD35E} & Current location ID & A number 0--255 mapped to names (``PALLET TOWN'', ``VIRIDIAN CITY''\ldots) \\
+\code{0xD163} & Party size & How many Pokémon you carry \\
+\code{0xD16B}+offsets & Pokémon \#1 data & Species, HP, level, moves, status\ldots \\
+\code{0xD356} & Badges & One bit per badge, 8 badges in one byte \\
+\code{0xC3A0}--\code{0xC507} & On-screen text & Pokémon uses its own character encoding (\code{0x80} = `A', \code{0xA0} = `a', \ldots) which we translate to normal text \\
+\bottomrule
+\end{tabularx}
+
+\vspace{0.5em}
+The result is a human-readable block the AI receives as text:
+
+\begin{verbatim}
+Player: RED
+Rival: BLUE
+Money: $3000
+Location: PALLET TOWN
+Coordinates: (5, 6)
+Valid Moves: up, down, left
+Badges: BOULDER
+Inventory:
+  POTION x2
+Dialog: None
+
+Pokemon Party:
+CHARMANDER (CHARMANDER):
+Level 8 - HP: 21/25
+Types: FIRE
+- SCRATCH (PP: 35)
+- GROWL (PP: 40)
+\end{verbatim}
+
+This matters because vision models are decent but not perfect at reading tiny Game Boy text --- memory reading gives the AI \emph{ground truth}.
+
+\subsection{The Collision Map (Overworld Only)}
+
+When walking around the world, the program also builds an ASCII map of what is walkable:
+
+\begin{verbatim}
++----------+
+|███·······|
+|███···█···|
+|███···█···|
+|████·····█|
+|████↓····█|
+|██████████|
++----------+
+\end{verbatim}
+
+\begin{itemize}[nosep]
+  \item \code{█} = wall/obstacle (cannot walk there)
+  \item \code{·} = walkable path
+  \item \code{S} = a sprite (an NPC or object)
+  \item \code{↓} = \textbf{you}, always at the center; the arrow shows which way you are facing
+\end{itemize}
+
+It is built from PyBoy's ``game wrapper'', which exposes the tile grid and collision data of the visible screen ($18\times20$ tiles, which we shrink to $9\times10$ --- one cell per ``walkable square'', since the player occupies $2\times2$ tiles). The facing direction is detected by finding the player's sprite pattern in the tile grid.
+
+Before the refactor this map was only printed to your terminal. \textbf{Now it is sent to the AI too}, so it can plan movement without guessing from pixels.
+
+% =====================================================================
+\section{How the AI ``Acts'': Tools}
+
+LLMs can do \textbf{tool calling} (a.k.a.\ function calling): you describe functions to the model in JSON, and instead of just answering with text, the model can reply ``call \code{press\_buttons} with \code{\{"buttons": ["a"]\}}''. The program then actually runs that function and sends the result back.
+
+\subsection{Tool 1: \code{press\_buttons} (the Main One)}
+
+\textbf{What the model sends:}
+\begin{verbatim}
+{
+  "buttons": ["up", "up", "a"],
+  "wait": true
+}
+\end{verbatim}
+
+\begin{itemize}[nosep]
+  \item \code{buttons}: a sequence from the 8 Game Boy buttons (\code{a}, \code{b}, \code{start}, \code{select}, \code{up}, \code{down}, \code{left}, \code{right})
+  \item \code{wait}: whether to pause $\sim$2 seconds of game time after each press (so animations and dialogs finish)
+\end{itemize}
+
+\textbf{What actually happens} (in \code{emulator.py}): for each button, PyBoy holds the button for 10 frames, releases it, then runs 120 more frames if \code{wait} is on. The Game Boy runs at $\sim$60 frames/second, so one waited press $\approx$ 2 in-game seconds.
+
+\textbf{What the model gets back:}
+\begin{verbatim}
+{
+  "result": "Pressed buttons: up, up, a",
+  "memory_info": "Player: RED\nMoney: $3000\nLocation: ...",
+  "collision_map": "+----------+\n|███·······|..."
+}
+\end{verbatim}
+\textbf{plus the screenshot as an actual image} (see Section~\ref{sec:conversation} --- this is the VisionToolNode trick).
+
+\subsection{Tool 2: \code{navigate\_to} (Optional, Off by Default)}
+
+Instead of pressing one arrow at a time, the model can say ``walk me to grid cell (row 2, col 7)''. The program then runs the \textbf{A* pathfinding algorithm} over the $9\times10$ collision grid:
+
+\begin{enumerate}[nosep]
+  \item Start at the player position (always the center, $(4,4)$).
+  \item Explore neighboring walkable cells, always trying the most promising path first (``promising'' = steps taken so far + straight-line distance remaining).
+  \item Avoid walls, avoid sprites, and respect Pokémon's weird ``tile-pair collision'' rules (special cases like ledges in caves/forests where you cannot step from tile X to tile Y even though both are walkable).
+  \item If the target is unreachable, walk to the closest reachable cell instead.
+\end{enumerate}
+
+It returns the list of moves (``up'', ``up'', ``right'', \ldots) and presses them one by one. Enable it with \code{USE\_NAVIGATOR=true} in your \code{.env}.
+
+\textbf{Why off by default?} It only sees the current screen (a $9\times10$ window), so it cannot plan across screens anyway --- and forcing the model to move step by step keeps it engaged with what is happening.
+
+% =====================================================================
+\section{The Brain Wiring: the LangGraph Flow}
+
+The loop is built with \textbf{LangGraph}, a library where you define your agent as a flowchart (``graph'') of \textbf{nodes} (boxes that do work) connected by \textbf{edges} (arrows, possibly conditional). The flowchart here:
+
+\begin{verbatim}
+                +-----------------------------------------+
+                v                                         |
+START --> [ agent ] --tool call?--> [ tools ] --+--> (back to agent)
+                |                               |
+                | no tool call                  +--> [ summarize ] --> (back to agent)
+                v                               |     (history too long)
+           [ nudge ] --> (back to agent)        |
+                |                               |
+                | 3 nudges in a row failed      |
+                v                               |
+               END <----------------------------+
+                      (step limit reached)
+\end{verbatim}
+
+\subsection{The Shared Clipboard: \code{GameAgentState}}
+
+Every node reads and writes one shared state object:
+
+\begin{verbatim}
+{
+  "messages":    [...],       # the full conversation with the AI so far
+  "emulator":    <Emulator>,  # the live Game Boy (tools grab it from here)
+  "step_count":  3,           # how many actions taken so far
+  "max_steps":   10,          # stop after this many
+  "max_history": 30,          # summarize when messages exceed this
+}
+\end{verbatim}
+
+\code{messages} is special: it uses LangGraph's \code{add\_messages} rule, meaning nodes do not overwrite the list --- they \emph{append} to it (or delete from it with special ``remove'' markers, used by summarization).
+
+\subsection{Node by Node}
+
+\textbf{\code{agent}} --- sends the whole conversation to Gemini and gets back its decision. The model is bound to the tools with \code{tool\_choice="any"}, which \textbf{forces} it to call a tool every single turn --- it can never just ramble text and stall the game. If the reply contains a tool call, the step counter goes up by one.
+
+\textbf{\code{tools}} --- actually executes the tool call (presses the buttons), captures the observation (screenshot + memory + collision map), and appends it to the conversation as a ``tool result'' message.
+
+\textbf{\code{summarize}} --- see Section~\ref{sec:summarization}.
+
+\textbf{\code{nudge}} --- the safety hatch. \code{tool\_choice="any"} \emph{should} guarantee a tool call every turn, but the guarantee comes from an API, not from math: some providers honor forced tool use imperfectly, and a reply truncated by the token limit can lose its tool call. When that happens, this node appends a human message --- \emph{``You did not call a tool in your last reply. Nothing happened in the game\ldots''} (from \code{prompts/human/nudge\_no\_tool.j2}) --- and sends the conversation back to the agent for another try. A counter tracks \emph{consecutive} tool-less replies (any successful tool call resets it); after \code{MAX\_NUDGES} failures in a row (default 3) the run ends instead of looping forever.
+
+\subsection{The Routing Decisions (the Arrows)}
+
+After \textbf{agent}: did the reply contain a tool call? Almost always yes (it is forced) $\rightarrow$ go to \code{tools}. If not $\rightarrow$ \code{nudge}, and back to the agent --- until 3 consecutive nudges fail, then $\rightarrow$ END.
+
+After \textbf{tools}, three checks in order:
+\begin{enumerate}[nosep]
+  \item \code{step\_count >= max\_steps}? $\rightarrow$ \textbf{END} (we are done; you asked for $N$ steps).
+  \item \code{len(messages) >= max\_history}? $\rightarrow$ \textbf{summarize} (conversation getting too fat).
+  \item Otherwise $\rightarrow$ back to \textbf{agent} for the next step.
+\end{enumerate}
+
+% =====================================================================
+\section{The Conversation Itself (What the AI Literally Receives)}
+\label{sec:conversation}
+
+LLMs are stateless --- they remember \emph{nothing} between calls. Every single step, we send the \textbf{entire conversation from the beginning}. The conversation looks like:
+
+\begin{verbatim}
+[SYSTEM]  You are playing Pokemon Red... (from prompts/system/game_player.j2)
+[USER]    You may now begin playing.
+[AI]      I'll start by pressing A to begin. -> press_buttons(["a"])
+[TOOL]    {"result": "Pressed buttons: a", "memory_info": ...} + <screenshot>
+[AI]      A dialog is open, I'll continue.  -> press_buttons(["a"])
+[TOOL]    {"result": ...} + <screenshot>
+[AI]      ...                               -> press_buttons(["a", "a"])
+...
+\end{verbatim}
+
+\subsection{The VisionToolNode Trick}
+
+There is a subtlety here. In the OpenAI-style API format, \textbf{tool result messages normally carry only text} --- no images. The naive workaround (which this project used before the refactor) was to send the screenshot as a separate follow-up user message, which clutters the conversation.
+
+\code{VisionToolNode} does it properly. When a tool returns a dictionary, it checks for image-ish keys (like \code{"screenshot"}) containing a \code{data:image/...} string, and splits the tool message into \textbf{content blocks}:
+
+\begin{verbatim}
+[
+  {"type": "text",      "text": "{\"result\": \"Pressed buttons: a\", ...}"},
+  {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR..."}}
+]
+\end{verbatim}
+
+LangChain supports image blocks inside tool messages, and OpenRouter translates this correctly for Gemini. So the screenshot rides \emph{inside} the tool result, exactly where it belongs.
+
+% =====================================================================
+\section{Summarization: the Memory Diet}
+\label{sec:summarization}
+
+\textbf{The problem:} every step adds $\sim$2 messages, and each tool message contains a full screenshot ($\sim$50--100\,KB of base64 text). After 15 steps you are sending megabytes of history on \emph{every} call. Cost grows, speed drops, and eventually you would blow past the model's context limit.
+
+\textbf{The fix:} when the message count reaches \code{max\_history} (default 30), the \code{summarize} node:
+
+\begin{enumerate}[nosep]
+  \item Sends the whole conversation to the model with one extra request: \emph{``Summarize your progress: key events, decisions, current objectives, location, team status, plans.''} (from \code{prompts/human/summarize\_request.j2})
+  \item Wipes the \textbf{entire} message history (a special \code{REMOVE\_ALL\_MESSAGES} marker).
+  \item Rebuilds a tiny fresh conversation:
+    \begin{itemize}[nosep]
+      \item the same system prompt,
+      \item one user message: \emph{``CONVERSATION HISTORY SUMMARY (representing 30 previous messages): \ldots''} + a \textbf{fresh screenshot} so the model is not blind + \emph{``You may now continue playing.''}
+    \end{itemize}
+\end{enumerate}
+
+The model loses the play-by-play details but keeps the plot. It is like a ``previously on\ldots'' TV recap. Then the loop continues normally.
+
+% =====================================================================
+\section{Two Full Scenarios, Frame by Frame}
+
+\subsection{Scenario A: a Normal Step (Talking to Professor Oak)}
+
+\begin{enumerate}[nosep]
+  \item \textbf{\code{agent} node} $\rightarrow$ the entire conversation (system prompt + history) is POSTed to OpenRouter. Gemini sees the last screenshot showing a dialog box: \emph{``OAK: Your very own POKéMON legend is about to unfold!''}
+  \item Gemini replies: text reasoning \emph{``There's an active dialog, I should advance it''} + tool call \code{press\_buttons(buttons=["a"], wait=true)}.
+  \item \textbf{Router}: tool call exists $\rightarrow$ go to \code{tools}.
+  \item \textbf{\code{tools} node} $\rightarrow$ grabs the emulator from state; PyBoy holds A for 10 frames, releases, runs 120 frames. The dialog advances. Then it captures: new screenshot (base64), memory dump (\code{Dialog: "So! You want the fire POKéMON, CHARMANDER?"}), no collision map (we are in a dialog, not the overworld).
+  \item The observation becomes a multimodal tool message appended to the conversation. Step counter: $7 \rightarrow 8$.
+  \item \textbf{Router}: $8 <$ \code{max\_steps}, 18 messages $< 30$ $\rightarrow$ back to \code{agent}. Repeat.
+\end{enumerate}
+
+\subsection{Scenario B: Hitting the History Limit Mid-Game}
+
+\begin{enumerate}[nosep]
+  \item Step 14 finishes; the conversation now has 30 messages. Router after \code{tools}: step limit not reached, but $30 \geq$ \code{max\_history} $\rightarrow$ go to \textbf{\code{summarize}}.
+  \item The summarize node asks the model for a recap. Gemini returns: \emph{``1. Key events: started the game, chose Charmander\ldots\ 4. Currently on Route 1 heading to Viridian City\ldots''}
+  \item History is wiped. New history = system prompt + recap + fresh screenshot + ``continue playing''. That is 2 messages instead of 30.
+  \item Back to \textbf{\code{agent}}: Gemini reads the recap, looks at the screenshot, and carries on walking north --- without remembering each individual button press, but knowing exactly where it is and why.
+\end{enumerate}
+
+% =====================================================================
+\section{The Connection to the AI: \code{llm.py}}
+
+We talk to \textbf{OpenRouter} --- a broker that exposes hundreds of models behind one OpenAI-compatible API. Which model is just a setting (\code{GAME\_MODEL=google/gemini-3.1-flash-lite}), so you can swap to Claude or GPT by editing \code{.env}, no code changes.
+
+\code{get\_llm()} builds a \code{RobustChatOpenAI} --- a hardened version of LangChain's standard OpenAI client (ported from the tolatex backend) that handles real-world OpenRouter problems:
+
+\begin{itemize}
+  \item \textbf{Garbage in a 200 response}: sometimes the HTTP call ``succeeds'' but the body is truncated JSON, or contains an embedded error (\code{\{"message": "Provider returned error", "code": 500\}}). It detects these and retries with growing pauses (3\,s, 9\,s, 27\,s).
+  \item \textbf{Infinite generation loops}: if the model gets stuck repeating itself until it hits the token ceiling (\code{finish\_reason: "length"}), it can detect this and retry (off by default).
+  \item \textbf{Reasoning preservation}: ``thinking'' models return their reasoning in nonstandard fields that normally get dropped; this client saves them and re-sends them on later turns so multi-turn thinking stays coherent. With \code{THINKING=none} (the default here) this is dormant, but flip \code{THINKING=low/medium/high} in \code{.env} and it activates.
+  \item \textbf{Provider sorting}: requests OpenRouter's lowest-latency provider for the model.
+\end{itemize}
+
+% =====================================================================
+\section{Configuration: \code{settings.py} and \code{.env}}
+
+All knobs live in one pydantic-settings class. Anything can be set in \code{.env} (or as a real environment variable, case-insensitive):
+
+\begin{tabularx}{\textwidth}{@{}llX@{}}
+\toprule
+\textbf{Setting} & \textbf{Default} & \textbf{Meaning} \\
+\midrule
+\code{OPENROUTER\_API\_KEY} & --- & your key (required) \\
+\code{GAME\_MODEL} & \code{google/gemini-3.1-flash-lite} & the model that plays \\
+\code{SUMMARIZER\_MODEL} & \code{""} (= game model) & the model that writes recaps \\
+\code{TEMPERATURE} & 1.0 & randomness of decisions \\
+\code{MAX\_TOKENS} & 4000 & max length of each model reply \\
+\code{THINKING} & \code{none} & reasoning effort: none/minimal/low/medium/high \\
+\code{MAX\_STEPS} & 10 & default number of steps (CLI \code{--steps} overrides) \\
+\code{MAX\_HISTORY} & 30 & messages before a summary kicks in (CLI \code{--max-history} overrides) \\
+\code{USE\_NAVIGATOR} & false & expose the A* \code{navigate\_to} tool \\
+\code{MAX\_NUDGES} & 3 & consecutive tool-less replies tolerated before giving up \\
+\code{ROM\_PATH} & \code{Pokemon Red.gb} & default ROM file (CLI \code{--rom} overrides) \\
+\code{MAX\_REQUESTS\_PER\_SECOND} & 0 (off) & global API rate limit \\
+\bottomrule
+\end{tabularx}
+
+\vspace{0.5em}
+\code{get\_settings()} is cached --- the \code{.env} is read once per run. The prompts are equally swappable: they are Jinja2 template files in \code{prompts/}, so you can tweak the AI's personality or goals without touching Python.
+
+% =====================================================================
+\section{Money: What a Run Costs}
+
+Each step sends the full history, so cost grows until a summary resets it. With Gemini Flash Lite, observed costs were roughly \textbf{\$0.0001--0.0025 per step} (rising as history grows), so a 10-step run is about a penny. The two real cost levers:
+
+\begin{itemize}[nosep]
+  \item \code{MAX\_HISTORY} --- lower = more frequent summaries = cheaper but more forgetful.
+  \item The model --- flash-lite is among the cheapest vision models; switching to a frontier model multiplies cost by $\sim$100$\times$.
+\end{itemize}
+
+% =====================================================================
+\section{Honest Limitations (So You Are Not Surprised)}
+
+\begin{itemize}
+  \item \textbf{The model is forced to act every turn} (\code{tool\_choice="any"}) --- great for momentum, but it cannot ``stop and think'' across multiple replies.
+  \item \textbf{It is myopic}: it sees one screen at a time and a $9\times10$ collision window. Long-range navigation (cross-town trips) relies on its world knowledge of Pokémon Red, which is decent but imperfect.
+  \item \textbf{Summaries lose detail}: if something important was not mentioned in the recap, it is gone (e.g., ``I already searched that house'').
+  \item \textbf{Flash-lite is cheap, not brilliant}: it tends to skip the ``explain your reasoning'' part and just mash A through dialogs. It works, but do not expect speedrun strategy. Swap in a stronger model for smarter play.
+  \item \textbf{No save/checkpoint logic in the agent} --- the emulator supports loading a saved state (\code{--load-state file}), but the agent does not auto-save progress.
+\end{itemize}
+
+\end{document}

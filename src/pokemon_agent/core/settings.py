@@ -86,6 +86,10 @@ class Settings(BaseSettings):
         default=False,
         description="Expose the navigate_to pathfinding tool to the agent",
     )
+    max_nudges: int = Field(
+        default=3,
+        description="Consecutive tool-less agent turns to nudge before giving up",
+    )
 
     @property
     def api_key(self) -> str:
