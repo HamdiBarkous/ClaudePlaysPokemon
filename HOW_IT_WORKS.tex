@@ -311,6 +311,8 @@ LLMs are stateless --- they remember \emph{nothing} between calls. Every single 
 ...
 \end{verbatim}
 
+\textbf{Reality check:} whether the \code{[AI]} line contains any visible text depends on the model. The system prompt asks for brief reasoning before each action, but in observed runs Gemini Flash Lite ignores that and returns an \emph{empty} text with just the tool call --- so the real conversation is mostly \code{[AI] "" -> press\_buttons(...)}. Stronger models (or a mandatory ``reasoning'' parameter added to the tool schema) produce the explanations shown above.
+
 \subsection{The VisionToolNode Trick}
 
 There is a subtlety here. In the OpenAI-style API format, \textbf{tool result messages normally carry only text} --- no images. The naive workaround (which this project used before the refactor) was to send the screenshot as a separate follow-up user message, which clutters the conversation.
