@@ -45,7 +45,7 @@ class Settings(BaseSettings):
 
     # Model Configuration (OpenRouter model IDs, e.g. "google/gemini-3.1-flash-lite")
     game_model: str = Field(
-        default="google/gemini-3.1-flash-lite",
+        default="google/gemini-3-flash-preview",
         description="Model for gameplay decisions",
     )
     summarizer_model: str = Field(
@@ -61,7 +61,7 @@ class Settings(BaseSettings):
         description="Maximum output tokens per LLM call",
     )
     thinking: ThinkingLevel = Field(
-        default="none",
+        default="low",
         description="Reasoning effort level (none disables thinking)",
     )
     max_requests_per_second: float = Field(
