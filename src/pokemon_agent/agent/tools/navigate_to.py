@@ -45,7 +45,7 @@ def navigate_to(
     status, path = emulator.find_path(row, col)
     if path:
         for direction in path:
-            emulator.press_buttons([direction], True)
+            emulator.press_buttons([direction])
         result = f"Navigation successful: followed path with {len(path)} steps"
     else:
         result = f"Navigation failed: {status}"

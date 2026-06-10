@@ -993,6 +993,40 @@ class PokemonRedReader:
         """Read game corner coins"""
         return (self.memory[0xD5A4] << 8) + self.memory[0xD5A5]
 
+    def read_walk_counter(self) -> int:
+        """Frames remaining in the player's current walk step (0 = not mid-step)"""
+        return self.memory[0xCFC5]
+
+    def read_simulated_joypad_index(self) -> int:
+        """Remaining scripted auto-walk inputs (0 = no cutscene walk pending)"""
+        return self.memory[0xCD38]
+
+    def read_scripted_input_flag(self) -> bool:
+        """Whether the game is replaying simulated joypad inputs (wd730 bit 0)"""
+        return bool(self.memory[0xD730] & 1)
+
+    def is_engine_idle(self) -> bool:
+        """Whether the overworld engine is between actions.
+
+        Deliberately does NOT check wJoyIgnore (0xCD6B): it stays set through
+        entire cutscenes while A-presses still advance dialogs, so gating on it
+        stalls every cutscene dialog to the settle timeout.
+        """
+        return (
+            self.read_walk_counter() == 0
+            and self.read_simulated_joypad_index() == 0
+            and not self.read_scripted_input_flag()
+        )
+
+    def read_tilemap_buffer(self) -> bytes:
+        """Raw wTileMap (0xC3A0-0xC507): the game's CPU-side screen mirror.
+
+        Everything drawn — text, menus, the world — is composed here tile by
+        tile before being copied to VRAM, making it the authoritative "what is
+        on screen" signal (sprites/NPCs excluded).
+        """
+        return bytes(self.memory[0xC3A0:0xC508])
+
     def read_item_count(self) -> int:
         """Read number of items in inventory"""
         return self.memory[0xD31D]

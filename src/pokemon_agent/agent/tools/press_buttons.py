@@ -27,10 +27,6 @@ def press_buttons(
         "'select', 'up', 'down', 'left', 'right'",
     ],
     state: Annotated[dict, InjectedState],
-    wait: Annotated[
-        bool,
-        "Whether to wait for a brief period after pressing each button. Defaults to true.",
-    ] = True,
 ) -> dict:
     """Press a sequence of buttons on the Game Boy, narrating as you play.
 
@@ -48,9 +44,9 @@ def press_buttons(
     if speaker is not None:
         speaker.submit(say).wait_started()
 
-    logger.info(f"[Buttons] Pressing: {buttons} (wait={wait})")
+    logger.info(f"[Buttons] Pressing: {buttons}")
 
-    emulator.press_buttons(buttons, wait)
+    emulator.press_buttons(buttons)
 
     return {
         "result": f"Pressed buttons: {', '.join(buttons)}",

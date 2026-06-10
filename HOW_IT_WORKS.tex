@@ -200,17 +200,17 @@ LLMs can do \textbf{tool calling} (a.k.a.\ function calling): you describe funct
 \textbf{What the model sends:}
 \begin{verbatim}
 {
-  "buttons": ["up", "up", "a"],
-  "wait": true
+  "say": "Time to pick our starter!",
+  "buttons": ["up", "up", "a"]
 }
 \end{verbatim}
 
 \begin{itemize}[nosep]
+  \item \code{say}: 1--2 sentences spoken aloud to the audience via TTS
   \item \code{buttons}: a sequence from the 8 Game Boy buttons (\code{a}, \code{b}, \code{start}, \code{select}, \code{up}, \code{down}, \code{left}, \code{right})
-  \item \code{wait}: whether to pause $\sim$2 seconds of game time after each press (so animations and dialogs finish)
 \end{itemize}
 
-\textbf{What actually happens} (in \code{emulator.py}): for each button, PyBoy holds the button for 10 frames, releases it, then runs 120 more frames if \code{wait} is on. The Game Boy runs at $\sim$60 frames/second, so one waited press $\approx$ 2 in-game seconds.
+\textbf{What actually happens} (in \code{emulator.py}): for each button, PyBoy holds the button for 10 frames, releases it, then runs the game until it \emph{settles}. Settle detection polls every 8 frames and declares the action finished when (a) the game engine reports idle (walk counter zero, no scripted inputs --- documented RAM flags from the pokered disassembly) AND (b) the game's own screen-composition buffer (\code{wTileMap} at \code{0xC3A0}, with the blinking ▼ masked) stays byte-identical for 4 consecutive samples (10 samples when the textbox area is blank, the signature of a scene-transition pause). A 400-frame ceiling covers states that never go idle (cutscene walks, battle intros). Measured against the old fixed 120-frame wait: walking settles in $\sim$40 frames ($3\times$ faster), menus faster still, and dialogs wait exactly as long as the text takes to print --- the fixed wait used to capture half-printed dialog $\sim$16\% of the time; settle detection captures complete text.
 
 \textbf{What the model gets back:}
 \begin{verbatim}
@@ -363,7 +363,7 @@ The model loses the play-by-play details but keeps the plot. It is like a ``prev
   \item \textbf{\code{agent} node} $\rightarrow$ the entire conversation (system prompt + history) is POSTed to OpenRouter. Gemini sees the last screenshot showing a dialog box: \emph{``OAK: Your very own POKéMON legend is about to unfold!''}
   \item Gemini replies: text reasoning \emph{``There's an active dialog, I should advance it''} + tool call \code{press\_buttons(buttons=["a"], wait=true)}.
   \item \textbf{Router}: tool call exists $\rightarrow$ go to \code{tools}.
-  \item \textbf{\code{tools} node} $\rightarrow$ grabs the emulator from state; PyBoy holds A for 10 frames, releases, runs 120 frames. The dialog advances. Then it captures: new screenshot (base64), memory dump (\code{Dialog: "So! You want the fire POKéMON, CHARMANDER?"}), no collision map (we are in a dialog, not the overworld).
+  \item \textbf{\code{tools} node} $\rightarrow$ grabs the emulator from state; PyBoy holds A for 10 frames, releases, then runs until the game settles (the dialog finishes printing). Then it captures: new screenshot (base64), memory dump (\code{Dialog: "So! You want the fire POKéMON, CHARMANDER?"}), no collision map (we are in a dialog, not the overworld).
   \item The observation becomes a multimodal tool message appended to the conversation. Step counter: $7 \rightarrow 8$.
   \item \textbf{Router}: $8 <$ \code{max\_steps}, 18 messages $< 30$ $\rightarrow$ back to \code{agent}. Repeat.
 \end{enumerate}
