@@ -35,8 +35,9 @@ Optional arguments:
 - `--display`: Run with display (not headless)
 - `--sound`: Enable sound (only applicable with display)
 - `--max-history-tokens`: Summarize the history once a turn's prompt reaches this many tokens (default: 30000)
-- `--state`: Save-state path (default: `game.state`) — the game auto-saves here on exit and auto-resumes from it on launch
-- `--new-game`: Start a fresh game instead of resuming the saved state
+- `--states-dir`: Folder for numbered saves (default: `states/`) — every run saves a new `game-NNN.state` on exit, and launch resumes from the most recent
+- `--state`: Resume from a specific save file (e.g. `states/game-007.state`) instead of the most recent
+- `--new-game`: Start a fresh game instead of resuming (the exit save still gets the next number — nothing is overwritten)
 
 Example:
 ```
