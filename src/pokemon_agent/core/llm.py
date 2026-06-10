@@ -16,6 +16,15 @@ from pokemon_agent.core.settings import ThinkingLevel, get_settings
 
 logger = logging.getLogger(__name__)
 
+# Maps the friendly settings value to Gemini's media_resolution enum.
+# OpenRouter forwards this top-level field into Gemini's generationConfig;
+# "none" is omitted so the provider default (high) applies.
+_MEDIA_RESOLUTION_ENUM = {
+    "low": "MEDIA_RESOLUTION_LOW",
+    "medium": "MEDIA_RESOLUTION_MEDIUM",
+    "high": "MEDIA_RESOLUTION_HIGH",
+}
+
 
 def _hit_token_limit(result: ChatResult) -> bool:
     """Check if the response was truncated by hitting the max output token limit."""
@@ -282,6 +291,13 @@ def get_llm(
         extra_body["reasoning"] = {"enabled": False}
     else:
         extra_body["reasoning"] = {"effort": resolved_thinking}
+
+    # Image input resolution is a Gemini-only knob; sending it to other models
+    # is at best ignored, so only attach it when routing to a Gemini model.
+    if "gemini" in resolved_model.lower():
+        media_resolution = _MEDIA_RESOLUTION_ENUM.get(settings.media_resolution)
+        if media_resolution:
+            extra_body["media_resolution"] = media_resolution
 
     return RobustChatOpenAI(
         model=resolved_model,

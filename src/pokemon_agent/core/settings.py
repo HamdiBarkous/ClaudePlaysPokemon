@@ -64,6 +64,15 @@ class Settings(BaseSettings):
         default="low",
         description="Reasoning effort level (none disables thinking)",
     )
+    media_resolution: Literal["none", "low", "medium", "high"] = Field(
+        default="low",
+        description=(
+            "Gemini image input resolution, controlling tokens spent per "
+            "screenshot. Measured cost for a 160x144 frame: low~255, medium~528, "
+            "high~1085 tokens. 'none' uses the provider default (high). Only "
+            "applied to Gemini models; ignored by others."
+        ),
+    )
     max_requests_per_second: float = Field(
         default=0.0,
         description="Global LLM API rate limit (requests per second, 0 to disable)",
