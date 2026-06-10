@@ -21,4 +21,3 @@ class GameAgentState(TypedDict, total=False):
 
     # Tracking
     step_count: int
-    nudge_count: int  # consecutive agent turns without a tool call

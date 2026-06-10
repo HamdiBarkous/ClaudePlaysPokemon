@@ -86,9 +86,13 @@ class Settings(BaseSettings):
         default=False,
         description="Expose the navigate_to pathfinding tool to the agent",
     )
-    max_nudges: int = Field(
-        default=3,
-        description="Consecutive tool-less agent turns to nudge before giving up",
+    force_tool_use: bool = Field(
+        default=False,
+        description=(
+            "Force a tool call every turn (tool_choice=any). Guarantees action but "
+            "suppresses visible reasoning text; the default (tool_choice=auto) lets "
+            "the model narrate, with tool-less replies handled by the nudge node"
+        ),
     )
 
     @property

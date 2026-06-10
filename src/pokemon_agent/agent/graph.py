@@ -48,28 +48,24 @@ def agent_node(state: GameAgentState, model_with_tools: BaseChatModel) -> dict:
     for tool_call in response.tool_calls or []:
         logger.info(f"[Tool] Using tool: {tool_call['name']}")
 
-    # A step is an agent turn that takes an action. A turn with a tool call
-    # also resets the consecutive no-tool-call counter.
+    # A step is an agent turn that takes an action
     step_count = state.get("step_count", 0)
-    nudge_count = state.get("nudge_count", 0)
     if response.tool_calls:
         step_count += 1
-        nudge_count = 0
 
-    return {"messages": [response], "step_count": step_count, "nudge_count": nudge_count}
+    return {"messages": [response], "step_count": step_count}
 
 
 def nudge_node(state: GameAgentState) -> dict:
     """Tell the model its last reply did nothing because it called no tool.
 
-    tool_choice="any" should make this unreachable, but providers don't always
-    honor forced tool use (and replies can be truncated mid tool call).
+    Keeps the conversation user/assistant-alternating and gives the model an
+    explicit signal to act. The graph's recursion_limit is the only backstop
+    against a model that never acts.
     """
-    nudge_count = state.get("nudge_count", 0) + 1
-    logger.warning(f"[Agent] Reply had no tool call, nudging ({nudge_count})...")
+    logger.warning("[Agent] Reply had no tool call, nudging...")
     return {
         "messages": [HumanMessage(content=PromptManager.get_human_prompt("nudge_no_tool"))],
-        "nudge_count": nudge_count,
     }
 
 
@@ -130,18 +126,15 @@ def summarize_node(state: GameAgentState, summarizer: BaseChatModel) -> dict:
 # =============================================================================
 
 
-def route_after_agent(state: GameAgentState) -> Literal["tools", "nudge", "__end__"]:
+def route_after_agent(state: GameAgentState) -> Literal["tools", "nudge"]:
     """Execute tool calls if the model made any, otherwise nudge it to act.
 
-    Gives up (END) after settings.max_nudges consecutive tool-less replies so a
-    model that refuses to act can't loop forever.
+    Never ends the run — only reaching max_steps (checked after tools) does.
     """
     messages = state.get("messages", [])
     if messages and getattr(messages[-1], "tool_calls", None):
         return "tools"
-    if state.get("nudge_count", 0) < get_settings().max_nudges:
-        return "nudge"
-    return END
+    return "nudge"
 
 
 def route_after_tools(state: GameAgentState) -> Literal["agent", "summarize", "__end__"]:
@@ -183,8 +176,11 @@ def build_game_graph(
         tools.append(navigate_to)
 
     # tool_choice="any" forces the model to always call a tool, preventing
-    # text-only turns from stalling the loop.
-    model_with_tools = model.bind_tools(tools, tool_choice="any")
+    # text-only turns from stalling the loop — but Anthropic models then emit
+    # no reasoning text at all. With "auto" the model can narrate before
+    # acting; the nudge node covers the occasional tool-less reply.
+    tool_choice = "any" if settings.force_tool_use else "auto"
+    model_with_tools = model.bind_tools(tools, tool_choice=tool_choice)
 
     workflow = StateGraph(GameAgentState)
 
@@ -198,7 +194,7 @@ def build_game_graph(
     workflow.add_conditional_edges(
         "agent",
         route_after_agent,
-        {"tools": "tools", "nudge": "nudge", END: END},
+        {"tools": "tools", "nudge": "nudge"},
     )
     workflow.add_conditional_edges(
         "tools",

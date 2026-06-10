@@ -250,9 +250,7 @@ START --> [ agent ] --tool call?--> [ tools ] --+--> (back to agent)
                 | no tool call                  +--> [ summarize ] --> (back to agent)
                 v                               |     (history too long)
            [ nudge ] --> (back to agent)        |
-                |                               |
-                | 3 nudges in a row failed      |
-                v                               |
+                                                |
                END <----------------------------+
                       (step limit reached)
 \end{verbatim}
@@ -275,17 +273,19 @@ Every node reads and writes one shared state object:
 
 \subsection{Node by Node}
 
-\textbf{\code{agent}} --- sends the whole conversation to Gemini and gets back its decision. The model is bound to the tools with \code{tool\_choice="any"}, which \textbf{forces} it to call a tool every single turn --- it can never just ramble text and stall the game. If the reply contains a tool call, the step counter goes up by one.
+\textbf{\code{agent}} --- sends the whole conversation to the model and gets back its decision. By default (\code{FORCE\_TOOL\_USE=false}) the tools are bound with \code{tool\_choice="auto"}, so the model may narrate its reasoning before acting; a reply without any tool call is handled by the \code{nudge} node. Setting \code{FORCE\_TOOL\_USE=true} switches to \code{tool\_choice="any"}, which \textbf{forces} a tool call every turn --- never stalls, but (by API design) suppresses all visible reasoning text. If the reply contains a tool call, the step counter goes up by one.
 
 \textbf{\code{tools}} --- actually executes the tool call (presses the buttons), captures the observation (screenshot + memory + collision map), and appends it to the conversation as a ``tool result'' message.
 
 \textbf{\code{summarize}} --- see Section~\ref{sec:summarization}.
 
-\textbf{\code{nudge}} --- the safety hatch. \code{tool\_choice="any"} \emph{should} guarantee a tool call every turn, but the guarantee comes from an API, not from math: some providers honor forced tool use imperfectly, and a reply truncated by the token limit can lose its tool call. When that happens, this node appends a human message --- \emph{``You did not call a tool in your last reply. Nothing happened in the game\ldots''} (from \code{prompts/human/nudge\_no\_tool.j2}) --- and sends the conversation back to the agent for another try. A counter tracks \emph{consecutive} tool-less replies (any successful tool call resets it); after \code{MAX\_NUDGES} failures in a row (default 3) the run ends instead of looping forever.
+\textbf{\code{nudge}} --- handles replies with no tool call (a tool-less reply means nothing happened in the game). This node appends a human message --- \emph{``You did not call a tool in your last reply. Nothing happened in the game\ldots''} (from \code{prompts/human/nudge\_no\_tool.j2}) --- and sends the conversation back to the agent for another try. The message matters for two reasons: it keeps the conversation alternating user/assistant (providers dislike two assistant messages in a row), and it gives the model an explicit signal to break out of a ``talking instead of acting'' pattern. There is no retry cap --- the run only ends at the step limit; LangGraph's \code{recursion\_limit} (set in \code{main.py}) is the final cost backstop if a model never acts.
+
+With the default \code{FORCE\_TOOL\_USE=false} (\code{tool\_choice="auto"}), the nudge is the active stall-prevention. With \code{FORCE\_TOOL\_USE=true}, tool calls are forced at the API level and this node is nearly dead code (it would only fire on provider quirks or truncated replies).
 
 \subsection{The Routing Decisions (the Arrows)}
 
-After \textbf{agent}: did the reply contain a tool call? Almost always yes (it is forced) $\rightarrow$ go to \code{tools}. If not $\rightarrow$ \code{nudge}, and back to the agent --- until 3 consecutive nudges fail, then $\rightarrow$ END.
+After \textbf{agent}: did the reply contain a tool call? Yes $\rightarrow$ go to \code{tools}. No $\rightarrow$ \code{nudge}, then back to the agent. The agent side never ends the run.
 
 After \textbf{tools}, three checks in order:
 \begin{enumerate}[nosep]
@@ -311,7 +311,13 @@ LLMs are stateless --- they remember \emph{nothing} between calls. Every single 
 ...
 \end{verbatim}
 
-\textbf{Reality check:} whether the \code{[AI]} line contains any visible text depends on the model. The system prompt asks for brief reasoning before each action, but in observed runs Gemini Flash Lite ignores that and returns an \emph{empty} text with just the tool call --- so the real conversation is mostly \code{[AI] "" -> press\_buttons(...)}. Stronger models (or a mandatory ``reasoning'' parameter added to the tool schema) produce the explanations shown above.
+\textbf{Reality check:} how much useful text the \code{[AI]} line contains depends on the model and on \code{FORCE\_TOOL\_USE}. Observed in real runs:
+\begin{itemize}[nosep]
+  \item \code{FORCE\_TOOL\_USE=true} (\code{tool\_choice="any"}): \emph{no} text at all, from any model --- forced tool use suppresses text by API design. The conversation is \code{[AI] "" -> press\_buttons(...)}.
+  \item \code{auto} + Claude Haiku 4.5: proper narration every turn (``I see the main menu with NEW GAME and OPTION. I'll select NEW GAME\ldots'').
+  \item \code{auto} + Gemini Flash Lite: acts reliably but emits only stray token fragments (``elf'', ``thought'') instead of real explanations --- a quirk of small Gemini models when mixing text with function calls. Harmless, just not informative.
+\end{itemize}
+A mandatory ``reasoning'' parameter in the tool schema would force explanations out of any model, at the cost of a few tokens per turn.
 
 \subsection{The VisionToolNode Trick}
 
@@ -403,7 +409,7 @@ All knobs live in one pydantic-settings class. Anything can be set in \code{.env
 \code{MAX\_STEPS} & 10 & default number of steps (CLI \code{--steps} overrides) \\
 \code{MAX\_HISTORY} & 30 & messages before a summary kicks in (CLI \code{--max-history} overrides) \\
 \code{USE\_NAVIGATOR} & false & expose the A* \code{navigate\_to} tool \\
-\code{MAX\_NUDGES} & 3 & consecutive tool-less replies tolerated before giving up \\
+\code{FORCE\_TOOL\_USE} & false & \code{true} forces a tool call every turn but suppresses reasoning text \\
 \code{ROM\_PATH} & \code{Pokemon Red.gb} & default ROM file (CLI \code{--rom} overrides) \\
 \code{MAX\_REQUESTS\_PER\_SECOND} & 0 (off) & global API rate limit \\
 \bottomrule
@@ -426,7 +432,7 @@ Each step sends the full history, so cost grows until a summary resets it. With 
 \section{Honest Limitations (So You Are Not Surprised)}
 
 \begin{itemize}
-  \item \textbf{The model is forced to act every turn} (\code{tool\_choice="any"}) --- great for momentum, but it cannot ``stop and think'' across multiple replies.
+  \item \textbf{One action per turn, no multi-reply deliberation} --- the loop expects each reply to act (tool-less replies just get nudged); the model cannot ``stop and think'' across several replies before committing.
   \item \textbf{It is myopic}: it sees one screen at a time and a $9\times10$ collision window. Long-range navigation (cross-town trips) relies on its world knowledge of Pokémon Red, which is decent but imperfect.
   \item \textbf{Summaries lose detail}: if something important was not mentioned in the recap, it is gone (e.g., ``I already searched that house'').
   \item \textbf{Flash-lite is cheap, not brilliant}: it tends to skip the ``explain your reasoning'' part and just mash A through dialogs. It works, but do not expect speedrun strategy. Swap in a stronger model for smarter play.

@@ -2,6 +2,8 @@ import argparse
 import logging
 import os
 
+from langgraph.errors import GraphRecursionError
+
 from pokemon_agent.agent import build_game_graph, build_initial_messages
 from pokemon_agent.core import get_settings
 from pokemon_agent.emulator import Emulator
@@ -100,6 +102,11 @@ def main():
         logger.info(f"Agent completed {final_state.get('step_count', 0)} steps")
     except KeyboardInterrupt:
         logger.info("Received keyboard interrupt, stopping")
+    except GraphRecursionError:
+        logger.error(
+            "Recursion limit reached before completing all steps — the model "
+            "kept replying without tool calls. Stopping."
+        )
     except Exception as e:
         logger.error(f"Error running agent: {e}")
         raise
