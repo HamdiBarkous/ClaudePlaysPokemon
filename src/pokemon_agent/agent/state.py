@@ -18,7 +18,7 @@ class GameAgentState(TypedDict, total=False):
 
     # Run parameters (set at start, may be overridden from the CLI)
     max_steps: int
-    max_history: int
+    max_history_tokens: int
 
     # Tracking
     step_count: int

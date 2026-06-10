@@ -34,7 +34,7 @@ Optional arguments:
 - `--steps`: Number of agent steps to run (default: 10)
 - `--display`: Run with display (not headless)
 - `--sound`: Enable sound (only applicable with display)
-- `--max-history`: Messages in history before summarization (default: 30)
+- `--max-history-tokens`: Summarize the history once a turn's prompt reaches this many tokens (default: 30000)
 - `--state`: Save-state path (default: `game.state`) — the game auto-saves here on exit and auto-resumes from it on launch
 - `--new-game`: Start a fresh game instead of resuming the saved state
 
@@ -84,5 +84,5 @@ src/pokemon_agent/
 1. The agent (LLM) decides on an action and calls the `press_buttons` tool
 2. The tool executes the button presses on the emulator
 3. The tool result carries a screenshot, memory-derived game state, and a collision map back to the model in a single multimodal tool message
-4. When the conversation grows past `--max-history` messages, a summarize node condenses it and play continues
+4. When a turn's prompt grows past `--max-history-tokens` (provider-reported usage, images included), a summarize node condenses the history and play continues
 5. The loop ends after `--steps` agent turns

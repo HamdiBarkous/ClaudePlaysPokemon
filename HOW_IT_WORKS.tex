@@ -265,7 +265,7 @@ Every node reads and writes one shared state object:
   "emulator":    <Emulator>,  # the live Game Boy (tools grab it from here)
   "step_count":  3,           # how many actions taken so far
   "max_steps":   10,          # stop after this many
-  "max_history": 30,          # summarize when messages exceed this
+  "max_history_tokens": 30000, # summarize when a prompt reaches this size
 }
 \end{verbatim}
 
@@ -290,7 +290,7 @@ After \textbf{agent}: did the reply contain a tool call? Yes $\rightarrow$ go to
 After \textbf{tools}, three checks in order:
 \begin{enumerate}[nosep]
   \item \code{step\_count >= max\_steps}? $\rightarrow$ \textbf{END} (we are done; you asked for $N$ steps).
-  \item \code{len(messages) >= max\_history}? $\rightarrow$ \textbf{summarize} (conversation getting too fat).
+  \item Did the last turn's prompt reach \code{max\_history\_tokens}? $\rightarrow$ \textbf{summarize} (conversation getting too fat). The size comes from the provider's reported token usage --- the exact measured size of the conversation, images included --- not from counting messages or running a local tokenizer. (If a provider returns no usage data, a 30-message count is the fallback trigger.)
   \item Otherwise $\rightarrow$ back to \textbf{agent} for the next step.
 \end{enumerate}
 
@@ -340,7 +340,7 @@ LangChain supports image blocks inside tool messages, and OpenRouter translates 
 
 \textbf{The problem:} every step adds $\sim$2 messages, and each tool message contains a full screenshot ($\sim$50--100\,KB of base64 text). After 15 steps you are sending megabytes of history on \emph{every} call. Cost grows, speed drops, and eventually you would blow past the model's context limit.
 
-\textbf{The fix:} when the message count reaches \code{max\_history} (default 30), the \code{summarize} node:
+\textbf{The fix:} when a turn's prompt reaches \code{max\_history\_tokens} (default 30{,}000, measured from the provider's reported usage), the \code{summarize} node:
 
 \begin{enumerate}[nosep]
   \item Sends the whole conversation to the model with one extra request: \emph{``Summarize your progress: key events, decisions, current objectives, location, team status, plans.''} (from \code{prompts/human/summarize\_request.j2})
@@ -371,7 +371,7 @@ The model loses the play-by-play details but keeps the plot. It is like a ``prev
 \subsection{Scenario B: Hitting the History Limit Mid-Game}
 
 \begin{enumerate}[nosep]
-  \item Step 14 finishes; the conversation now has 30 messages. Router after \code{tools}: step limit not reached, but $30 \geq$ \code{max\_history} $\rightarrow$ go to \textbf{\code{summarize}}.
+  \item Step 14 finishes; the last prompt weighed in at 31{,}000 tokens. Router after \code{tools}: step limit not reached, but $31{,}000 \geq$ \code{max\_history\_tokens} $\rightarrow$ go to \textbf{\code{summarize}}.
   \item The summarize node asks the model for a recap. Gemini returns: \emph{``1. Key events: started the game, chose Charmander\ldots\ 4. Currently on Route 1 heading to Viridian City\ldots''}
   \item History is wiped. New history = system prompt + recap + fresh screenshot + ``continue playing''. That is 2 messages instead of 30.
   \item Back to \textbf{\code{agent}}: Gemini reads the recap, looks at the screenshot, and carries on walking north --- without remembering each individual button press, but knowing exactly where it is and why.
@@ -407,7 +407,7 @@ All knobs live in one pydantic-settings class. Anything can be set in \code{.env
 \code{MAX\_TOKENS} & 4000 & max length of each model reply \\
 \code{THINKING} & \code{none} & reasoning effort: none/minimal/low/medium/high \\
 \code{MAX\_STEPS} & 10 & default number of steps (CLI \code{--steps} overrides) \\
-\code{MAX\_HISTORY} & 30 & messages before a summary kicks in (CLI \code{--max-history} overrides) \\
+\code{MAX\_HISTORY\_TOKENS} & 30000 & prompt size that triggers a summary (CLI \code{--max-history-tokens} overrides) \\
 \code{USE\_NAVIGATOR} & false & expose the A* \code{navigate\_to} tool \\
 \code{FORCE\_TOOL\_USE} & false & \code{true} forces a tool call every turn but suppresses reasoning text \\
 \code{ROM\_PATH} & \code{Pokemon Red.gb} & default ROM file (CLI \code{--rom} overrides) \\
@@ -424,7 +424,7 @@ All knobs live in one pydantic-settings class. Anything can be set in \code{.env
 Each step sends the full history, so cost grows until a summary resets it. With Gemini Flash Lite, observed costs were roughly \textbf{\$0.0001--0.0025 per step} (rising as history grows), so a 10-step run is about a penny. The two real cost levers:
 
 \begin{itemize}[nosep]
-  \item \code{MAX\_HISTORY} --- lower = more frequent summaries = cheaper but more forgetful.
+  \item \code{MAX\_HISTORY\_TOKENS} --- lower = more frequent summaries = cheaper but more forgetful.
   \item The model --- flash-lite is among the cheapest vision models; switching to a frontier model multiplies cost by $\sim$100$\times$.
 \end{itemize}
 

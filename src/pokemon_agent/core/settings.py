@@ -78,9 +78,12 @@ class Settings(BaseSettings):
         default=10,
         description="Number of agent steps to run",
     )
-    max_history: int = Field(
-        default=30,
-        description="Maximum number of messages in history before summarization",
+    max_history_tokens: int = Field(
+        default=30_000,
+        description=(
+            "Summarize the history once a turn's prompt reaches this many tokens "
+            "(measured from the provider's reported usage, images included)"
+        ),
     )
     use_navigator: bool = Field(
         default=False,

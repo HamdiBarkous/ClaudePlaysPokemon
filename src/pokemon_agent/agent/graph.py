@@ -4,7 +4,7 @@ The agent loop:
 1. The model sees the conversation (screenshots, memory state, collision maps)
 2. It reasons briefly and calls the press_buttons (or navigate_to) tool
 3. VisionToolNode executes the tool and returns a multimodal observation
-4. When the history grows past max_history, it is condensed into a summary
+4. When a turn's prompt grows past max_history_tokens, the history is condensed into a summary
 5. The loop ends after max_steps agent turns
 """
 
@@ -160,13 +160,38 @@ def route_after_agent(state: GameAgentState) -> Literal["tools", "nudge"]:
     return "nudge"
 
 
+# When the provider returns no token usage, fall back to a message-count trigger
+FALLBACK_MAX_MESSAGES = 30
+
+
+def _last_prompt_tokens(messages) -> int | None:
+    """Input token count of the most recent LLM call, as reported by the provider.
+
+    This is the true measured size of the conversation (images included) —
+    more honest than counting messages or running a local tokenizer.
+    """
+    for message in reversed(messages):
+        usage = getattr(message, "usage_metadata", None)
+        if usage and usage.get("input_tokens"):
+            return usage["input_tokens"]
+    return None
+
+
 def route_after_tools(state: GameAgentState) -> Literal["agent", "summarize", "__end__"]:
     """Decide whether to keep playing, summarize the history first, or stop."""
     settings = get_settings()
 
     if state.get("step_count", 0) >= state.get("max_steps", settings.max_steps):
         return END
-    if len(state.get("messages", [])) >= state.get("max_history", settings.max_history):
+
+    messages = state.get("messages", [])
+    prompt_tokens = _last_prompt_tokens(messages)
+    limit = state.get("max_history_tokens", settings.max_history_tokens)
+    if prompt_tokens is not None:
+        if prompt_tokens >= limit:
+            logger.info(f"[Agent] History at {prompt_tokens} prompt tokens (limit {limit})")
+            return "summarize"
+    elif len(messages) >= FALLBACK_MAX_MESSAGES:
         return "summarize"
     return "agent"
 

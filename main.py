@@ -51,10 +51,10 @@ def main():
         help="Enable sound (only applicable with display)",
     )
     parser.add_argument(
-        "--max-history",
+        "--max-history-tokens",
         type=int,
-        default=settings.max_history,
-        help="Maximum number of messages in history before summarization",
+        default=settings.max_history_tokens,
+        help="Summarize the history once a turn's prompt reaches this many tokens",
     )
     parser.add_argument(
         "--state",
@@ -107,7 +107,7 @@ def main():
         "emulator": emulator,
         "speaker": speaker,
         "max_steps": args.steps,
-        "max_history": args.max_history,
+        "max_history_tokens": args.max_history_tokens,
         "step_count": 0,
     }
 
