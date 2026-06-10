@@ -18,7 +18,6 @@ dead air is when the model thinks longer than the previous line lasts.
 import logging
 import queue
 import threading
-import time
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +41,30 @@ class Clip:
 
 
 class Speaker:
-    """Two-stage TTS pipeline: synthesize in background, play in order."""
+    """Two-stage TTS pipeline: synthesize in background, play in order.
+
+    Playback uses one persistent OutputStream with blocking writes and high
+    latency: per-clip sd.play() opened/closed a stream per sentence (audible
+    pops on WSLg's Pulse bridge) and fed audio from a Python callback that
+    crackled whenever other threads held the GIL too long.
+    """
 
     def __init__(self, engine):
         self._engine = engine
         self._synth_q: queue.Queue = queue.Queue()
         self._play_q: queue.Queue = queue.Queue()
+        self._stream = None
+        self._win_player = None
+        # WSLg's Pulse bridge stutters during playback (verified: identical
+        # wavs play clean on Windows) — route audio to Windows when on WSL
+        from pokemon_agent.voice.windows_audio import WindowsAudioPlayer, is_wsl
+
+        if is_wsl():
+            try:
+                self._win_player = WindowsAudioPlayer()
+                logger.info("[TTS] Playing through Windows audio (WSL detected)")
+            except Exception as e:
+                logger.warning(f"[TTS] Windows audio bridge unavailable ({e}), using Pulse")
         self._synth_thread = threading.Thread(target=self._synth_worker, daemon=True)
         self._play_thread = threading.Thread(target=self._play_worker, daemon=True)
         self._synth_thread.start()
@@ -67,12 +84,14 @@ class Speaker:
         """Stop playback and shut down the pipeline."""
         self._synth_q.put(None)
         self._play_q.put(None)
-        try:
-            import sounddevice as sd
-
-            sd.stop()
-        except Exception:
-            pass
+        if self._win_player is not None:
+            self._win_player.stop()
+        if self._stream is not None:
+            try:
+                self._stream.abort()
+                self._stream.close()
+            except Exception:
+                pass
 
     def _synth_worker(self) -> None:
         while True:
@@ -93,33 +112,47 @@ class Speaker:
             clip.started.set()
             try:
                 if clip.audio is not None and len(clip.audio):
-                    self._play_bounded(clip.audio)
+                    if self._win_player is not None:
+                        self._win_player.play(clip.audio, self._engine.sample_rate)
+                    else:
+                        self._write_to_stream(clip.audio)
             except Exception as e:
                 logger.warning(f"[TTS] Playback failed: {e}")
+                self._stream = None  # reopen on the next clip
             finally:
                 clip.finished.set()
 
-    def _play_bounded(self, audio) -> None:
-        """Play a clip, waiting at most its duration plus a margin.
+    def _get_stream(self):
+        if self._stream is None:
+            import os
 
-        sd.wait() relies on the audio backend signaling completion, and a
-        wedged stream (seen with WSLg PulseAudio) never does — hanging the
-        worker and killing all subsequent speech. We know exactly how long
-        the clip lasts, so never wait meaningfully longer than that.
-        """
-        import sounddevice as sd
+            import sounddevice as sd
 
-        duration = len(audio) / self._engine.sample_rate
-        sd.play(audio, self._engine.sample_rate)
-        stream = sd.get_stream()
-        deadline = time.monotonic() + duration + 2.0
-        while stream.active and time.monotonic() < deadline:
-            time.sleep(0.1)
-        if stream.active:
-            logger.warning(
-                f"[TTS] Playback overran {duration:.1f}s clip — resetting stream"
+            # WSLg's Pulse bridge crackles with small buffers; this is the
+            # documented knob for the ALSA->Pulse plugin (must be set before
+            # the first connection)
+            os.environ.setdefault("PULSE_LATENCY_MSEC", "60")
+            self._stream = sd.OutputStream(
+                samplerate=self._engine.sample_rate,
+                channels=1,
+                dtype="int16",
+                latency="high",
             )
-            sd.stop()
+            self._stream.start()
+        return self._stream
+
+    def _write_to_stream(self, audio) -> None:
+        """Blocking write into the persistent stream, with padded edges.
+
+        The short silence before and after each clip keeps the line's first
+        syllable clear of the stream spin-up and masks the underflow boundary
+        between clips.
+        """
+        import numpy as np
+
+        pad = np.zeros(int(0.05 * self._engine.sample_rate), dtype=audio.dtype)
+        stream = self._get_stream()
+        stream.write(np.concatenate([pad, audio, pad]).reshape(-1, 1))
 
 
 class NoOpSpeaker:
