@@ -1,7 +1,7 @@
-import io
+import concurrent.futures
 import logging
-import pickle
-from collections import deque
+import os
+import threading
 import heapq
 
 from pokemon_agent.emulator.memory_reader import PokemonRedReader, StatusCondition
@@ -12,36 +12,82 @@ logger = logging.getLogger(__name__)
 
 
 class Emulator:
+    """PyBoy wrapper where a single dedicated thread owns the emulator.
+
+    SDL is not thread-safe: when ticks (which render the window) come from
+    changing threads — LangGraph runs tools in worker threads — the window
+    silently stops updating. So PyBoy is constructed and driven exclusively on
+    one thread; every other thread submits work to it via _run_on_pyboy.
+    """
+
     def __init__(self, rom_path, headless=True, sound=False):
-        if headless:
-            self.pyboy = PyBoy(
-                rom_path,
-                window="null",
-                cgb=True,
-            )
-        else:
-            self.pyboy = PyBoy(
-                rom_path,
-                cgb=True,
-                sound=sound,
-            )
+        self._headless = headless
+        self._stop_keepalive = threading.Event()
+        self._keepalive_thread = None
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="pyboy"
+        )
+        self._pyboy_thread = self._executor.submit(threading.current_thread).result()
+
+        def construct():
+            if headless:
+                return PyBoy(rom_path, window="null", cgb=True)
+            # XWayland tolerates threaded SDL rendering better than Wayland
+            os.environ.setdefault("SDL_VIDEODRIVER", "x11")
+            return PyBoy(rom_path, cgb=True, sound=sound)
+
+        self.pyboy = self._executor.submit(construct).result()
+
+    def _run_on_pyboy(self, fn, *args):
+        """Run fn on the dedicated PyBoy thread (directly if already on it)."""
+        if threading.current_thread() is self._pyboy_thread:
+            return fn(*args)
+        return self._executor.submit(fn, *args).result()
 
     def tick(self, frames):
         """Advance the emulator by the specified number of frames."""
+        self._run_on_pyboy(self._tick_impl, frames)
+
+    def _tick_impl(self, frames):
         for _ in range(frames):
             self.pyboy.tick()
 
     def initialize(self):
         """Initialize the emulator."""
-        # Run the emulator for a short time to make sure it's ready
-        self.pyboy.set_emulation_speed(0)
-        for _ in range(60):
-            self.tick(60)
-        self.pyboy.set_emulation_speed(1)
+
+        def boot():
+            # Run the emulator for a short time to make sure it's ready
+            self.pyboy.set_emulation_speed(0)
+            self._tick_impl(3600)
+            self.pyboy.set_emulation_speed(1)
+
+        self._run_on_pyboy(boot)
+        if not self._headless:
+            # With a display, keep the game running while the agent thinks —
+            # the window only renders and pumps events on tick().
+            self._keepalive_thread = threading.Thread(
+                target=self._keepalive_loop, daemon=True
+            )
+            self._keepalive_thread.start()
+
+    def _keepalive_loop(self):
+        # Submits one frame at a time so agent work (button presses, reads)
+        # interleaves fairly on the PyBoy thread. At emulation speed 1 each
+        # tick self-paces to ~60fps.
+        while not self._stop_keepalive.is_set():
+            try:
+                self._run_on_pyboy(self._tick_impl, 1)
+            except RuntimeError:
+                return  # executor shut down
 
     def get_screenshot(self):
         """Get the current screenshot."""
-        return Image.fromarray(self.pyboy.screen.ndarray)
+
+        def impl():
+            # Copy: the screen buffer keeps updating as the game runs
+            return Image.fromarray(self.pyboy.screen.ndarray.copy())
+
+        return self._run_on_pyboy(impl)
 
     def load_state(self, state_filename):
         """
@@ -51,7 +97,7 @@ class Emulator:
         Args:
             state_filename: Path to the state file
         """
-        self.pyboy.load_state(open(state_filename, "rb"))
+        self._run_on_pyboy(lambda: self.pyboy.load_state(open(state_filename, "rb")))
 
     def press_buttons(self, buttons, wait=True):
         """Press a sequence of buttons on the Game Boy.
@@ -63,25 +109,26 @@ class Emulator:
         Returns:
             str: Result of the button presses
         """
-        results = []
-        
-        for button in buttons:
-            if button not in ["a", "b", "start", "select", "up", "down", "left", "right"]:
-                results.append(f"Invalid button: {button}")
-                continue
-                
-            self.pyboy.button_press(button)
-            self.tick(10)   # Press briefly
-            self.pyboy.button_release(button)
-            
-            if wait:
-                self.tick(120) # Wait longer after button release
-            else:
-                self.tick(10)   # Brief pause between button presses
-                
-            results.append(f"Pressed {button}")
-        
-        return "\n".join(results)
+        def impl():
+            results = []
+            for button in buttons:
+                if button not in ["a", "b", "start", "select", "up", "down", "left", "right"]:
+                    results.append(f"Invalid button: {button}")
+                    continue
+
+                self.pyboy.button_press(button)
+                self._tick_impl(10)   # Press briefly
+                self.pyboy.button_release(button)
+
+                if wait:
+                    self._tick_impl(120) # Wait longer after button release
+                else:
+                    self._tick_impl(10)   # Brief pause between button presses
+
+                results.append(f"Pressed {button}")
+            return results
+
+        return "\n".join(self._run_on_pyboy(impl))
 
     def get_coordinates(self):
         """
@@ -89,8 +136,9 @@ class Emulator:
         Returns:
             tuple[int, int]: (x, y) coordinates
         """
-        reader = PokemonRedReader(self.pyboy.memory)
-        return reader.read_coordinates()
+        return self._run_on_pyboy(
+            lambda: PokemonRedReader(self.pyboy.memory).read_coordinates()
+        )
 
     def get_active_dialog(self):
         """
@@ -98,8 +146,9 @@ class Emulator:
         Returns:
             str: Dialog text
         """
-        reader = PokemonRedReader(self.pyboy.memory)
-        dialog = reader.read_dialog()
+        dialog = self._run_on_pyboy(
+            lambda: PokemonRedReader(self.pyboy.memory).read_dialog()
+        )
         if dialog:
             return dialog
         return None
@@ -110,8 +159,9 @@ class Emulator:
         Returns:
             str: Location name
         """
-        reader = PokemonRedReader(self.pyboy.memory)
-        return reader.read_location()
+        return self._run_on_pyboy(
+            lambda: PokemonRedReader(self.pyboy.memory).read_location()
+        )
 
     def _get_direction(self, array):
         """Determine the player's facing direction from the sprite pattern."""
@@ -150,13 +200,17 @@ class Emulator:
         Returns:
             str: A string representation of the ASCII map with legend
         """
-        # Get the terrain and movement data
-        full_map = self.pyboy.game_wrapper.game_area()
-        collision_map = self.pyboy.game_wrapper.game_area_collision()
-        downsampled_terrain = self._downsample_array(collision_map)
+        # Snapshot terrain, movement and sprite data atomically — the
+        # game keeps running between submissions to the PyBoy thread
+        def snapshot():
+            return (
+                self.pyboy.game_wrapper.game_area(),
+                self.pyboy.game_wrapper.game_area_collision(),
+                self.get_sprites(),
+            )
 
-        # Get sprite locations
-        sprite_locations = self.get_sprites()
+        full_map, collision_map, sprite_locations = self._run_on_pyboy(snapshot)
+        downsampled_terrain = self._downsample_array(collision_map)
 
         # Get character direction from the full map
         direction = self._get_direction(full_map)
@@ -215,7 +269,9 @@ class Emulator:
             list[str]: List of valid movement directions
         """
         # Get collision map
-        collision_map = self.pyboy.game_wrapper.game_area_collision()
+        collision_map = self._run_on_pyboy(
+            lambda: self.pyboy.game_wrapper.game_area_collision()
+        )
         terrain = self._downsample_array(collision_map)
 
         # Player is always at position (4,4) in the 9x10 downsampled map
@@ -283,8 +339,10 @@ class Emulator:
         # Group sprites by their exact Y coordinate
         sprites_by_y = {}
 
-        for i in range(40):
-            sp = self.pyboy.get_sprite(i)
+        sprites = self._run_on_pyboy(
+            lambda: [self.pyboy.get_sprite(i) for i in range(40)]
+        )
+        for i, sp in enumerate(sprites):
             if sp.on_screen:
                 x = int(sp.x / 160 * 10)
                 y = int(sp.y / 144 * 9)
@@ -342,15 +400,17 @@ class Emulator:
         Returns:
             tuple[str, list[str]]: Status message and sequence of movements
         """
-        # Get collision map, terrain, and sprites
-        collision_map = self.pyboy.game_wrapper.game_area_collision()
-        terrain = self._downsample_array(collision_map)
-        sprite_locations = self.get_sprites()
+        # Snapshot collision map, terrain, sprites, and tileset atomically
+        def snapshot():
+            return (
+                self.pyboy.game_wrapper.game_area_collision(),
+                self.get_sprites(),
+                self.pyboy.game_wrapper._get_screen_background_tilemap(),
+                PokemonRedReader(self.pyboy.memory).read_tileset(),
+            )
 
-        # Get full map for tile values and current tileset
-        full_map = self.pyboy.game_wrapper._get_screen_background_tilemap()
-        reader = PokemonRedReader(self.pyboy.memory)
-        tileset = reader.read_tileset()
+        collision_map, sprite_locations, full_map, tileset = self._run_on_pyboy(snapshot)
+        terrain = self._downsample_array(collision_map)
 
         # Start at player position (always 4,4 in the 9x10 grid)
         start = (4, 4)
@@ -489,6 +549,9 @@ class Emulator:
         """
         Reads the game state from memory and returns a string representation of it.
         """
+        return self._run_on_pyboy(self._get_state_from_memory_impl)
+
+    def _get_state_from_memory_impl(self) -> str:
         reader = PokemonRedReader(self.pyboy.memory)
         memory_str = ""
 
@@ -537,4 +600,10 @@ class Emulator:
         return memory_str
 
     def stop(self):
-        self.pyboy.stop()
+        self._stop_keepalive.set()
+        if self._keepalive_thread is not None:
+            self._keepalive_thread.join(timeout=2.0)
+        try:
+            self._run_on_pyboy(self.pyboy.stop)
+        finally:
+            self._executor.shutdown(wait=False)
