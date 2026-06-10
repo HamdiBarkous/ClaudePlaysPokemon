@@ -1,12 +1,18 @@
 import argparse
+import faulthandler
 import logging
 import os
+import signal
+
+# `kill -USR1 <pid>` dumps all thread stacks — for diagnosing a stuck run
+faulthandler.register(signal.SIGUSR1)
 
 from langgraph.errors import GraphRecursionError
 
 from pokemon_agent.agent import build_game_graph, build_initial_messages
 from pokemon_agent.core import get_settings
 from pokemon_agent.emulator import Emulator
+from pokemon_agent.voice import create_speaker
 
 # Set up logging
 logging.basicConfig(
@@ -83,10 +89,12 @@ def main():
         emulator.load_state(args.load_state)
 
     graph = build_game_graph()
+    speaker = create_speaker(settings)
 
     initial_state = {
         "messages": build_initial_messages(),
         "emulator": emulator,
+        "speaker": speaker,
         "max_steps": args.steps,
         "max_history": args.max_history,
         "step_count": 0,
@@ -111,6 +119,7 @@ def main():
         logger.error(f"Error running agent: {e}")
         raise
     finally:
+        speaker.stop()
         emulator.stop()
 
 

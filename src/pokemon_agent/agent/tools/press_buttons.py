@@ -40,6 +40,14 @@ def press_buttons(
     """
     emulator = state["emulator"]
     logger.info(f"[Say] {say}")
+
+    # Voice gate: start synthesizing now, press buttons only once the previous
+    # line finished and this one starts playing — speech stays in sync with
+    # what's happening on screen.
+    speaker = state.get("speaker")
+    if speaker is not None:
+        speaker.submit(say).wait_started()
+
     logger.info(f"[Buttons] Pressing: {buttons} (wait={wait})")
 
     emulator.press_buttons(buttons, wait)

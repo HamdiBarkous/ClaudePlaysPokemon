@@ -12,8 +12,9 @@ class GameAgentState(TypedDict, total=False):
     # Conversation - use add_messages reducer to accumulate messages
     messages: Annotated[list[BaseMessage], add_messages]
 
-    # Context (read-only, set at start) — live Emulator instance used by tools
+    # Context (read-only, set at start) — live Emulator and TTS Speaker used by tools
     emulator: Any
+    speaker: Any
 
     # Run parameters (set at start, may be overridden from the CLI)
     max_steps: int

@@ -95,6 +95,24 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Voice / TTS
+    tts_engine: Literal["cartesia", "none"] = Field(
+        default="cartesia",
+        description="TTS engine for spoken narration (falls back to none if unconfigured)",
+    )
+    cartesia_api_key: str = Field(
+        default="",
+        description="Cartesia API key",
+    )
+    cartesia_voice: str = Field(
+        default="",
+        description="Cartesia voice ID",
+    )
+    cartesia_model: str = Field(
+        default="sonic-2",
+        description="Cartesia TTS model",
+    )
+
     @property
     def api_key(self) -> str:
         """Get the OpenRouter API key."""

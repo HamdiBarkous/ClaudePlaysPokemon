@@ -9,6 +9,7 @@ The agent loop:
 """
 
 import logging
+import time
 from typing import Literal
 
 from langchain_core.language_models import BaseChatModel
@@ -41,7 +42,9 @@ def build_initial_messages() -> list:
 
 def agent_node(state: GameAgentState, model_with_tools: BaseChatModel) -> dict:
     """Main agent reasoning node - calls the LLM to decide what to do."""
+    start = time.monotonic()
     response = model_with_tools.invoke(state["messages"])
+    logger.info(f"[Agent] LLM responded in {time.monotonic() - start:.1f}s")
 
     if response.text:
         logger.info(f"[Text] {response.text}")

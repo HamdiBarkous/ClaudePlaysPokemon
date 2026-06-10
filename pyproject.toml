@@ -5,6 +5,7 @@ description = "An LLM agent that plays Pokemon Red through the PyBoy emulator"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "httpx>=0.28.1",
     "jinja2>=3.1.6",
     "langchain-core>=1.0.0",
     "langchain-openai>=0.3.0",
@@ -15,6 +16,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "python-frontmatter>=1.1.0",
+    "sounddevice>=0.5.5",
 ]
 
 [build-system]

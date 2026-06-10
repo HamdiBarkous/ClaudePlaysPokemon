@@ -34,6 +34,12 @@ def navigate_to(
     """
     emulator = state["emulator"]
     logger.info(f"[Say] {say}")
+
+    # Voice gate: see press_buttons — keeps speech in sync with the screen.
+    speaker = state.get("speaker")
+    if speaker is not None:
+        speaker.submit(say).wait_started()
+
     logger.info(f"[Navigation] Navigating to: ({row}, {col})")
 
     status, path = emulator.find_path(row, col)
