@@ -113,14 +113,9 @@ A quick one-liner for each:
 
 The AI never touches pixels or RAM directly. After every action, the program builds an \textbf{observation} with three parts (see \code{agent/tools/\_observation.py}):
 
-\subsection{The Screenshot}
+\subsection{The Screenshots (Per-Press Keyframes)}
 
-PyBoy exposes the current screen as an image. We:
-\begin{enumerate}[nosep]
-  \item Grab it (\code{emulator.get\_screenshot()} $\rightarrow$ a $160\times144$ pixel image),
-  \item Double its size ($320\times288$ --- small images are hard for vision models),
-  \item Encode it as a \textbf{base64 data URL} --- literally the image converted into a long text string like \code{data:image/png;base64,iVBORw0KGg...}. LLM APIs only accept text/JSON, so images always travel as text.
-\end{enumerate}
+PyBoy exposes the current screen as a $160\times144$ pixel image. The emulator captures one \textbf{keyframe after each button press settles}, so a batched action (say, five A-presses through a dialog) yields five screenshots --- the model sees everything that happened during its action, not just the end state (the last \code{MAX\_KEYFRAMES} are kept, the final one always being the current state). Each frame is encoded as a \textbf{base64 data URL} --- the image converted into a long text string like \code{data:image/png;base64,iVBORw0KGg...} --- because LLM APIs only accept text/JSON. Token cost per frame is controlled by the \code{MEDIA\_RESOLUTION} setting (Gemini-only; \code{low} $\approx$ 255 tokens/frame reads Game Boy text perfectly, verified empirically).
 
 \subsection{The Memory Cheat-Sheet}
 
@@ -220,7 +215,7 @@ LLMs can do \textbf{tool calling} (a.k.a.\ function calling): you describe funct
   "collision_map": "+----------+\n|███·······|..."
 }
 \end{verbatim}
-\textbf{plus the screenshot as an actual image} (see Section~\ref{sec:conversation} --- this is the VisionToolNode trick).
+\textbf{plus one screenshot per button press, as actual images in press order} (see Section~\ref{sec:conversation} --- this is the VisionToolNode trick).
 
 \subsection{Tool 2: \code{navigate\_to} (Optional, Off by Default)}
 
@@ -408,6 +403,8 @@ All knobs live in one pydantic-settings class. Anything can be set in \code{.env
 \code{THINKING} & \code{none} & reasoning effort: none/minimal/low/medium/high \\
 \code{MAX\_STEPS} & 10 & default number of steps (CLI \code{--steps} overrides) \\
 \code{MAX\_HISTORY\_TOKENS} & 30000 & prompt size that triggers a summary (CLI \code{--max-history-tokens} overrides) \\
+\code{MAX\_KEYFRAMES} & 8 & per-press screenshots attached to an observation (most recent kept) \\
+\code{MEDIA\_RESOLUTION} & low & Gemini image token spend per frame (low$\approx$255, high$\approx$1085) \\
 \code{USE\_NAVIGATOR} & false & expose the A* \code{navigate\_to} tool \\
 \code{FORCE\_TOOL\_USE} & false & \code{true} forces a tool call every turn but suppresses reasoning text \\
 \code{ROM\_PATH} & \code{Pokemon Red.gb} & default ROM file (CLI \code{--rom} overrides) \\

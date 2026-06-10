@@ -47,7 +47,7 @@ class VisionToolNode(ToolNode):
 
     # Keys that indicate image data in tool outputs
     IMAGE_KEYS = {
-        "image", "screenshot", "image_url", "preview_image",
+        "image", "screenshot", "screenshots", "image_url", "preview_image",
     }
 
     def _format_output_with_images(self, output: Any) -> str | list[dict]:

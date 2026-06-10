@@ -43,14 +43,16 @@ def navigate_to(
     logger.info(f"[Navigation] Navigating to: ({row}, {col})")
 
     status, path = emulator.find_path(row, col)
+    keyframes = []
     if path:
         for direction in path:
-            emulator.press_buttons([direction])
+            _, kfs = emulator.press_buttons([direction])
+            keyframes.extend(kfs)
         result = f"Navigation successful: followed path with {len(path)} steps"
     else:
         result = f"Navigation failed: {status}"
 
     return {
         "result": f"Navigation result: {result}",
-        **observe_after_action(emulator),
+        **observe_after_action(emulator, keyframes),
     }

@@ -1,18 +1,21 @@
-"""Shared post-action observation: screenshot, memory state, and collision map."""
+"""Shared post-action observation: keyframes, memory state, and collision map."""
 
 import logging
 
-from pokemon_agent.emulator import get_screenshot_data_url
+from pokemon_agent.core import get_settings
+from pokemon_agent.emulator import get_screenshot_data_url, image_to_data_url
 
 logger = logging.getLogger(__name__)
 
 
-def observe_after_action(emulator) -> dict:
+def observe_after_action(emulator, keyframes=None) -> dict:
     """Capture the game observation after a tool action.
 
-    Returns a dict with the memory state, collision map (overworld only), and a
-    screenshot as a data URL. VisionToolNode splits the screenshot out into an
-    image_url content block so the model can see it.
+    Returns a dict with the memory state, collision map (overworld only), and
+    the action's screenshots. With multiple keyframes (one per settled button
+    press), the most recent max_keyframes are attached in press order so the
+    model sees what happened inside the batch — VisionToolNode fans them out
+    into ordered image_url content blocks.
     """
     memory_info = emulator.get_state_from_memory()
     logger.info("[Memory State after action]")
@@ -22,10 +25,24 @@ def observe_after_action(emulator) -> dict:
     if collision_map:
         logger.info(f"[Collision Map after action]\n{collision_map}")
 
-    observation = {
-        "memory_info": memory_info,
-        "screenshot": get_screenshot_data_url(emulator, upscale=2),
-    }
+    observation = {"memory_info": memory_info}
+
+    if keyframes and len(keyframes) > 1:
+        limit = get_settings().max_keyframes
+        kept = keyframes[-limit:]
+        info = (
+            "One screenshot per button press, in press order; the last one is "
+            "the current state."
+        )
+        if len(kept) < len(keyframes):
+            info += f" (showing the last {len(kept)} of {len(keyframes)} presses)"
+        observation["screenshots_info"] = info
+        observation["screenshots"] = [image_to_data_url(kf) for kf in kept]
+    elif keyframes:
+        observation["screenshot"] = image_to_data_url(keyframes[-1])
+    else:
+        observation["screenshot"] = get_screenshot_data_url(emulator)
+
     if collision_map:
         observation["collision_map"] = collision_map
     return observation

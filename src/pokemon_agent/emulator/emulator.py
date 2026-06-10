@@ -128,10 +128,14 @@ class Emulator:
             buttons (list[str]): List of buttons to press in sequence
 
         Returns:
-            str: Result of the button presses
+            tuple[str, list[Image.Image]]: Result text and one keyframe per
+            press, captured after that press settled (the last one is the
+            current state). Lets the model see what happened inside a batch
+            instead of only the end state.
         """
         def impl():
             results = []
+            keyframes = []
             for button in buttons:
                 if button not in ["a", "b", "start", "select", "up", "down", "left", "right"]:
                     results.append(f"Invalid button: {button}")
@@ -142,10 +146,12 @@ class Emulator:
                 self.pyboy.button_release(button)
                 self._settle_impl()   # Run until the game stops reacting
 
+                keyframes.append(Image.fromarray(self.pyboy.screen.ndarray.copy()))
                 results.append(f"Pressed {button}")
-            return results
+            return results, keyframes
 
-        return "\n".join(self._run_on_pyboy(impl))
+        results, keyframes = self._run_on_pyboy(impl)
+        return "\n".join(results), keyframes
 
     def _screen_mirror(self) -> bytes:
         """wTileMap with the blinking continue-arrow masked out."""

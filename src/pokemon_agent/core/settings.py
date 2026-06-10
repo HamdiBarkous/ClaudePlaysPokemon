@@ -98,6 +98,13 @@ class Settings(BaseSettings):
         default=False,
         description="Expose the navigate_to pathfinding tool to the agent",
     )
+    max_keyframes: int = Field(
+        default=8,
+        description=(
+            "Maximum per-press keyframes attached to an observation (the most "
+            "recent ones are kept; the last is always the current state)"
+        ),
+    )
     force_tool_use: bool = Field(
         default=False,
         description=(

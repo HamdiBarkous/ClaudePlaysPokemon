@@ -45,7 +45,7 @@ def build_initial_messages(emulator=None) -> list:
             },
             {
                 "type": "image_url",
-                "image_url": {"url": get_screenshot_data_url(emulator, upscale=2)},
+                "image_url": {"url": get_screenshot_data_url(emulator)},
             },
             {"type": "text", "text": emulator.get_state_from_memory()},
         ]
@@ -122,7 +122,7 @@ def summarize_node(state: GameAgentState, summarizer: BaseChatModel) -> dict:
             {"type": "text", "text": "\n\nCurrent game screenshot for reference:"},
             {
                 "type": "image_url",
-                "image_url": {"url": get_screenshot_data_url(state["emulator"], upscale=2)},
+                "image_url": {"url": get_screenshot_data_url(state["emulator"])},
             },
             {
                 "type": "text",
