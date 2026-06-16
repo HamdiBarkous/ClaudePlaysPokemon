@@ -980,6 +980,44 @@ class PokemonRedReader:
         map_id = self.memory[0xD35E]
         return MapLocation(map_id).name.replace("_", " ")
 
+    def read_map_id(self) -> int:
+        """Read current map number"""
+        return self.memory[0xD35E]
+
+    def read_map_dimensions(self) -> tuple[int, int]:
+        """Current map's (width, height) in walking tiles.
+
+        The header stores them in 2x2-tile blocks at wCurMapHeight/Width.
+        """
+        return self.memory[0xD369] * 2, self.memory[0xD368] * 2
+
+    def is_player_placed(self) -> bool:
+        """Whether the player's coordinates are valid for the current map.
+
+        False during the warp fade: the game updates the map number first
+        and places the player later, and in between the screen is frozen —
+        so this is the signal that a map transition actually finished.
+        """
+        width, height = self.read_map_dimensions()
+        if width == 0 or height == 0:
+            return True  # no map header loaded (title screen) — nothing to check
+        x, y = self.read_coordinates()
+        return x < width and y < height
+
+    def read_warps(self) -> list[tuple[int, int]]:
+        """(x, y) of every warp tile on the current map.
+
+        Warps are how maps connect: doors, stairs, cave mouths, mat exits.
+        The map header keeps them at wNumberOfWarps/wWarpEntries (0xD3AE+),
+        4 bytes per entry: y, x, destination warp id, destination map.
+        """
+        count = min(self.memory[0xD3AE], 32)
+        warps = []
+        for i in range(count):
+            base = 0xD3AF + i * 4
+            warps.append((self.memory[base + 1], self.memory[base]))
+        return warps
+
     def read_tileset(self) -> str:
         """Read current map's tileset name"""
         tileset_id = self.memory[0xD367]
@@ -1004,6 +1042,15 @@ class PokemonRedReader:
     def read_scripted_input_flag(self) -> bool:
         """Whether the game is replaying simulated joypad inputs (wd730 bit 0)"""
         return bool(self.memory[0xD730] & 1)
+
+    def read_joy_ignore(self) -> int:
+        """Bitmask of joypad buttons the game is currently ignoring.
+
+        Nonzero through warp transitions and scripted sequences. Not part of
+        is_engine_idle (it stays set across entire cutscenes), but useful as
+        a targeted "warp still in progress" signal.
+        """
+        return self.memory[0xCD6B]
 
     def is_engine_idle(self) -> bool:
         """Whether the overworld engine is between actions.

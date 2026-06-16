@@ -1,7 +1,7 @@
 """ReAct agent graph for playing Pokemon Red.
 
 The agent loop:
-1. The model sees the conversation (screenshots, memory state, collision maps)
+1. The model sees the conversation (screenshots, memory state, explored map)
 2. It reasons briefly and calls the press_buttons (or navigate_to) tool
 3. VisionToolNode executes the tool and returns a multimodal observation
 4. When a turn's prompt grows past max_history_tokens, the history is condensed into a summary
@@ -49,6 +49,9 @@ def build_initial_messages(emulator=None) -> list:
             },
             {"type": "text", "text": emulator.get_state_from_memory()},
         ]
+        world_map = emulator.get_world_map_text()
+        if world_map:
+            kickoff_content.append({"type": "text", "text": world_map})
     return [
         SystemMessage(content=PromptManager.get_system_prompt("game_player")),
         HumanMessage(content=kickoff_content),

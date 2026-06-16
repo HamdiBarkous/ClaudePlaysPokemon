@@ -74,6 +74,11 @@ def _next_state_path(states_dir: str) -> str:
     return os.path.join(states_dir, f"game-{max(numbers, default=0) + 1:03d}.state")
 
 
+def _map_sidecar(state_path: str) -> str:
+    """The explored-map file saved/loaded alongside a game state."""
+    return re.sub(r"\.state$", "", state_path) + ".map.json"
+
+
 def main():
     settings = get_settings()
 
@@ -165,6 +170,9 @@ def main():
     if load_path:
         logger.info(f"Resuming saved game from {load_path}")
         emulator.load_state(load_path)
+        map_path = _map_sidecar(load_path)
+        if os.path.exists(map_path):
+            emulator.world_map.load(map_path)
 
     # One OpenRouter session per run: the dashboard groups these requests so
     # the total cost of this run is visible at a glance
@@ -205,6 +213,7 @@ def main():
         try:
             save_path = _next_state_path(states_dir)
             emulator.save_state(save_path)
+            emulator.world_map.save(_map_sidecar(save_path))
             logger.info(f"Saved game state to {save_path}")
         except Exception as e:
             logger.error(f"Failed to save game state: {e}")

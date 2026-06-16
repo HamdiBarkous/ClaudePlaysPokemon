@@ -81,7 +81,7 @@ pokemon/
    |  |- graph.py                   <- THE BRAIN WIRING: the loop logic (LangGraph)
    |  |- state.py                   <- the shared "memory" of the loop
    |  |- tools/press_buttons.py     <- the AI's "hands" (button presses)
-   |  |- tools/navigate_to.py       <- optional auto-walking tool (off by default)
+   |  |- tools/navigate_to.py       <- auto-walking tool (A* over the explored map)
    |  |- vision_tool_node.py        <- makes screenshots visible to the AI
    |  `- prompt_manager.py          <- loads & renders the prompt templates
    `- emulator/
@@ -103,7 +103,7 @@ A quick one-liner for each:
 \code{state.py} & The clipboard everyone shares: message history, step counter, the emulator itself. \\
 \code{tools/} & The two actions the AI is allowed to take. \\
 \code{vision\_tool\_node.py} & The trick that lets the AI literally \emph{see} screenshots inside tool results. \\
-\code{emulator.py} & Knows how to press buttons, take screenshots, and build the collision map. \\
+\code{emulator.py} & Knows how to press buttons, take screenshots, and maintain the explored world map. \\
 \code{memory\_reader.py} & Knows \emph{where in the Game Boy's RAM} the game stores money, party, dialog\ldots\ and decodes it. \\
 \bottomrule
 \end{tabularx}
@@ -159,31 +159,34 @@ Types: FIRE
 
 This matters because vision models are decent but not perfect at reading tiny Game Boy text --- memory reading gives the AI \emph{ground truth}.
 
-\subsection{The Collision Map (Overworld Only)}
+\subsection{The Explored World Map (Overworld Only)}
 
-When walking around the world, the program also builds an ASCII map of what is walkable:
+The model has no spatial memory of its own: each turn it only sees the current screen, so left alone it re-explores the same rooms and circles mazes for hours (every public ``LLM plays Pokémon'' project hit this). So the program keeps a persistent \textbf{fog-of-war map}: after every settled button press, the walkability of every tile currently on screen is recorded into a per-map dictionary, in the game's own coordinate system. The observation then includes a rendering of everything explored so far:
 
 \begin{verbatim}
-+----------+
-|███·······|
-|███···█···|
-|███···█···|
-|████·····█|
-|████↓····█|
-|██████████|
-+----------+
+VIRIDIAN POKECENTER - explored map. You are at (x=3, y=7), facing up.
+      0    5
+ y=3 #....S....
+ y=4 ##........
+ y=5 ##........
+ y=6 ###....##.
+ y=7 ###.^D.##.
+ y=8 ##########
+Legend: . explored ground, # wall/obstacle, ? unexplored,
+D door/warp, S person/object standing there right now, arrow = you.
+Doors/warps on this map: (3, 7), (4, 7)
+People/objects on screen: (4, 3)
+Reachable UNEXPLORED spots: (3, 3) 4 steps, (2, 3) 5 steps, ...
 \end{verbatim}
 
+Three parts matter:
 \begin{itemize}[nosep]
-  \item \code{█} = wall/obstacle (cannot walk there)
-  \item \code{·} = walkable path
-  \item \code{S} = a sprite (an NPC or object)
-  \item \code{↓} = \textbf{you}, always at the center; the arrow shows which way you are facing
+  \item \textbf{The map itself} remembers terrain far off screen, with coordinate rulers so the model can name any tile.
+  \item \textbf{Doors/warps} come straight from the map header in RAM (\code{wNumberOfWarps} at \code{0xD3AE}) --- ground truth for where the exits are.
+  \item \textbf{The frontier list} (``reachable UNEXPLORED spots'') is computed by flood-filling the explored map: walkable tiles that border unknown space. This is the single most effective anti-stuck signal reported by the Gemini Plays Pokémon project --- when the model feels lost, the prompt tells it to go to one of these instead of claiming it is stuck.
 \end{itemize}
 
-It is built from PyBoy's ``game wrapper'', which exposes the tile grid and collision data of the visible screen ($18\times20$ tiles, which we shrink to $9\times10$ --- one cell per ``walkable square'', since the player occupies $2\times2$ tiles). The facing direction is detected by finding the player's sprite pattern in the tile grid.
-
-Before the refactor this map was only printed to your terminal. \textbf{Now it is sent to the AI too}, so it can plan movement without guessing from pixels.
+The screen is read through PyBoy's ``game wrapper'' ($18\times20$ tiles, shrunk to $9\times10$ walkable squares since the player occupies $2\times2$ tiles) and anchored to the player's RAM coordinates. Recording is skipped whenever the screen is not a clean overworld view (dialogs and menus overwrite the tiles they cover; mid-warp the RAM is half-updated). Tiles under NPCs stay unknown --- NPCs move. The map is saved as \code{states/game-NNN.map.json} next to each save state, so resuming a game resumes its exploration memory too.
 
 % =====================================================================
 \section{How the AI ``Acts'': Tools}
@@ -205,32 +208,32 @@ LLMs can do \textbf{tool calling} (a.k.a.\ function calling): you describe funct
   \item \code{buttons}: a sequence from the 8 Game Boy buttons (\code{a}, \code{b}, \code{start}, \code{select}, \code{up}, \code{down}, \code{left}, \code{right})
 \end{itemize}
 
-\textbf{What actually happens} (in \code{emulator.py}): for each button, PyBoy holds the button for 10 frames, releases it, then runs the game until it \emph{settles}. Settle detection polls every 8 frames and declares the action finished when (a) the game engine reports idle (walk counter zero, no scripted inputs --- documented RAM flags from the pokered disassembly) AND (b) the game's own screen-composition buffer (\code{wTileMap} at \code{0xC3A0}, with the blinking ▼ masked) stays byte-identical for 4 consecutive samples (10 samples when the textbox area is blank, the signature of a scene-transition pause). A 400-frame ceiling covers states that never go idle (cutscene walks, battle intros). Measured against the old fixed 120-frame wait: walking settles in $\sim$40 frames ($3\times$ faster), menus faster still, and dialogs wait exactly as long as the text takes to print --- the fixed wait used to capture half-printed dialog $\sim$16\% of the time; settle detection captures complete text.
+\textbf{What actually happens} (in \code{emulator.py}): for each button, PyBoy holds the button for 10 frames, releases it, then runs the game until it \emph{settles}. Settle detection polls every 8 frames and declares the action finished when (a) the game engine reports idle (walk counter zero, no scripted inputs --- documented RAM flags from the pokered disassembly) AND (b) the game's own screen-composition buffer (\code{wTileMap} at \code{0xC3A0}, with the blinking ▼ masked) \emph{plus the palette registers} (screen fades are palette-only --- without them a mid-warp fade looks settled while the new map is half-loaded) stays byte-identical for 4 consecutive samples (10 samples when the textbox area is blank, the signature of a scene-transition pause). A 400-frame ceiling covers states that never go idle (cutscene walks, battle intros). Measured against the old fixed 120-frame wait: walking settles in $\sim$40 frames ($3\times$ faster), menus faster still, and dialogs wait exactly as long as the text takes to print --- the fixed wait used to capture half-printed dialog $\sim$16\% of the time; settle detection captures complete text.
 
 \textbf{What the model gets back:}
 \begin{verbatim}
 {
   "result": "Pressed buttons: up, up, a",
   "memory_info": "Player: RED\nMoney: $3000\nLocation: ...",
-  "collision_map": "+----------+\n|███·······|..."
+  "map": "VIRIDIAN CITY - explored map. You are at (x=23, y=28)..."
 }
 \end{verbatim}
 \textbf{plus one screenshot per button press, as actual images in press order} (see Section~\ref{sec:conversation} --- this is the VisionToolNode trick).
 
-\subsection{Tool 2: \code{navigate\_to} (Optional, Off by Default)}
+\subsection{Tool 2: \code{navigate\_to} (On by Default)}
 
-Instead of pressing one arrow at a time, the model can say ``walk me to grid cell (row 2, col 7)''. The program then runs the \textbf{A* pathfinding algorithm} over the $9\times10$ collision grid:
+Instead of pressing one arrow at a time, the model can say ``walk me to $(23, 25)$'' --- using the same coordinates the explored map, the doors list, and the frontier list are labeled with. The program runs \textbf{A*} over the fog-of-war map (not just the visible screen), so it can walk to places far off screen, then executes the path one verified step at a time:
 
 \begin{enumerate}[nosep]
-  \item Start at the player position (always the center, $(4,4)$).
-  \item Explore neighboring walkable cells, always trying the most promising path first (``promising'' = steps taken so far + straight-line distance remaining).
-  \item Avoid walls, avoid sprites, and respect Pokémon's weird ``tile-pair collision'' rules (special cases like ledges in caves/forests where you cannot step from tile X to tile Y even though both are walkable).
-  \item If the target is unreachable, walk to the closest reachable cell instead.
+  \item Plan a path through explored, walkable tiles to the target.
+  \item Press one step; check the player's RAM position actually changed.
+  \item If it didn't (a wandering NPC, a ledge, a spin tile --- things collision data can't see), mark that step as blocked and re-plan around it.
+  \item Stop early --- with an explanation to the model --- when a warp triggers (``walked through a door into a new area''), when a dialog or battle interrupts, or when no route through explored terrain exists (``explore toward it first'').
 \end{enumerate}
 
-It returns the list of moves (``up'', ``up'', ``right'', \ldots) and presses them one by one. Enable it with \code{USE\_NAVIGATOR=true} in your \code{.env}.
+Targeting a door walks through it; targeting a person walks up and faces it (the final ``bump'' is how you talk to NPCs). Disable with \code{USE\_NAVIGATOR=false} in your \code{.env}.
 
-\textbf{Why off by default?} It only sees the current screen (a $9\times10$ window), so it cannot plan across screens anyway --- and forcing the model to move step by step keeps it engaged with what is happening.
+\textbf{Why is this safe to leave on now?} The old version could only path within the visible $9\times10$ window, which made it nearly useless. Long-range navigation over remembered terrain is the feature that, per the public Gemini-vs-Claude comparison, let Gemini get twice as far on a third of the actions.
 
 % =====================================================================
 \section{The Brain Wiring: the LangGraph Flow}
@@ -270,7 +273,7 @@ Every node reads and writes one shared state object:
 
 \textbf{\code{agent}} --- sends the whole conversation to the model and gets back its decision. By default (\code{FORCE\_TOOL\_USE=false}) the tools are bound with \code{tool\_choice="auto"}, so the model may narrate its reasoning before acting; a reply without any tool call is handled by the \code{nudge} node. Setting \code{FORCE\_TOOL\_USE=true} switches to \code{tool\_choice="any"}, which \textbf{forces} a tool call every turn --- never stalls, but (by API design) suppresses all visible reasoning text. If the reply contains a tool call, the step counter goes up by one.
 
-\textbf{\code{tools}} --- actually executes the tool call (presses the buttons), captures the observation (screenshot + memory + collision map), and appends it to the conversation as a ``tool result'' message.
+\textbf{\code{tools}} --- actually executes the tool call (presses the buttons), captures the observation (screenshot + memory + explored map), and appends it to the conversation as a ``tool result'' message.
 
 \textbf{\code{summarize}} --- see Section~\ref{sec:summarization}.
 
@@ -358,7 +361,7 @@ The model loses the play-by-play details but keeps the plot. It is like a ``prev
   \item \textbf{\code{agent} node} $\rightarrow$ the entire conversation (system prompt + history) is POSTed to OpenRouter. Gemini sees the last screenshot showing a dialog box: \emph{``OAK: Your very own POKéMON legend is about to unfold!''}
   \item Gemini replies: text reasoning \emph{``There's an active dialog, I should advance it''} + tool call \code{press\_buttons(buttons=["a"], wait=true)}.
   \item \textbf{Router}: tool call exists $\rightarrow$ go to \code{tools}.
-  \item \textbf{\code{tools} node} $\rightarrow$ grabs the emulator from state; PyBoy holds A for 10 frames, releases, then runs until the game settles (the dialog finishes printing). Then it captures: new screenshot (base64), memory dump (\code{Dialog: "So! You want the fire POKéMON, CHARMANDER?"}), no collision map (we are in a dialog, not the overworld).
+  \item \textbf{\code{tools} node} $\rightarrow$ grabs the emulator from state; PyBoy holds A for 10 frames, releases, then runs until the game settles (the dialog finishes printing). Then it captures: new screenshot (base64), memory dump (\code{Dialog: "So! You want the fire POKéMON, CHARMANDER?"}), no explored map (we are in a dialog, not the overworld).
   \item The observation becomes a multimodal tool message appended to the conversation. Step counter: $7 \rightarrow 8$.
   \item \textbf{Router}: $8 <$ \code{max\_steps}, 18 messages $< 30$ $\rightarrow$ back to \code{agent}. Repeat.
 \end{enumerate}
@@ -405,7 +408,7 @@ All knobs live in one pydantic-settings class. Anything can be set in \code{.env
 \code{MAX\_HISTORY\_TOKENS} & 30000 & prompt size that triggers a summary (CLI \code{--max-history-tokens} overrides) \\
 \code{MAX\_KEYFRAMES} & 8 & per-press screenshots attached to an observation (most recent kept) \\
 \code{MEDIA\_RESOLUTION} & low & Gemini image token spend per frame (low$\approx$255, high$\approx$1085) \\
-\code{USE\_NAVIGATOR} & false & expose the A* \code{navigate\_to} tool \\
+\code{USE\_NAVIGATOR} & true & expose the A* \code{navigate\_to} tool \\
 \code{FORCE\_TOOL\_USE} & false & \code{true} forces a tool call every turn but suppresses reasoning text \\
 \code{ROM\_PATH} & \code{Pokemon Red.gb} & default ROM file (CLI \code{--rom} overrides) \\
 \code{MAX\_REQUESTS\_PER\_SECOND} & 0 (off) & global API rate limit \\
@@ -430,7 +433,7 @@ Each step sends the full history, so cost grows until a summary resets it. With 
 
 \begin{itemize}
   \item \textbf{One action per turn, no multi-reply deliberation} --- the loop expects each reply to act (tool-less replies just get nudged); the model cannot ``stop and think'' across several replies before committing.
-  \item \textbf{It is myopic}: it sees one screen at a time and a $9\times10$ collision window. Long-range navigation (cross-town trips) relies on its world knowledge of Pokémon Red, which is decent but imperfect.
+  \item \textbf{Its spatial memory is only as good as its exploration}: the fog-of-war map and \code{navigate\_to} cover everything it has \emph{seen}, but cross-town trips through never-visited territory still mean exploring tile by tile, guided by the frontier list and its imperfect world knowledge of Pokémon Red.
   \item \textbf{Summaries lose detail}: if something important was not mentioned in the recap, it is gone (e.g., ``I already searched that house'').
   \item \textbf{Flash-lite is cheap, not brilliant}: it tends to skip the ``explain your reasoning'' part and just mash A through dialogs. It works, but do not expect speedrun strategy. Swap in a stronger model for smarter play.
   \item \textbf{No save/checkpoint logic in the agent} --- the emulator supports loading a saved state (\code{--load-state file}), but the agent does not auto-save progress.

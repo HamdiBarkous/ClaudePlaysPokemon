@@ -1,4 +1,4 @@
-"""Shared post-action observation: keyframes, memory state, and collision map."""
+"""Shared post-action observation: keyframes, memory state, and explored map."""
 
 import logging
 
@@ -11,19 +11,19 @@ logger = logging.getLogger(__name__)
 def observe_after_action(emulator, keyframes=None) -> dict:
     """Capture the game observation after a tool action.
 
-    Returns a dict with the memory state, collision map (overworld only), and
-    the action's screenshots. With multiple keyframes (one per settled button
-    press), the most recent max_keyframes are attached in press order so the
-    model sees what happened inside the batch — VisionToolNode fans them out
-    into ordered image_url content blocks.
+    Returns a dict with the memory state, explored world map (overworld
+    only), and the action's screenshots. With multiple keyframes (one per
+    settled button press), the most recent max_keyframes are attached in
+    press order so the model sees what happened inside the batch —
+    VisionToolNode fans them out into ordered image_url content blocks.
     """
     memory_info = emulator.get_state_from_memory()
     logger.info("[Memory State after action]")
     logger.info(memory_info)
 
-    collision_map = emulator.get_collision_map()
-    if collision_map:
-        logger.info(f"[Collision Map after action]\n{collision_map}")
+    world_map = emulator.get_world_map_text()
+    if world_map:
+        logger.info(f"[Explored map after action]\n{world_map}")
 
     observation = {"memory_info": memory_info}
 
@@ -43,6 +43,6 @@ def observe_after_action(emulator, keyframes=None) -> dict:
     else:
         observation["screenshot"] = get_screenshot_data_url(emulator)
 
-    if collision_map:
-        observation["collision_map"] = collision_map
+    if world_map:
+        observation["map"] = world_map
     return observation

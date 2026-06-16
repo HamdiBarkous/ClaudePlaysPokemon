@@ -8,6 +8,18 @@
 *.ram
 *.state
 
+# Save-state sidecars (explored world map saved next to each game-NNN.state)
+*.map.json
+states/
+
+# LaTeX build artifacts (HOW_IT_WORKS.tex source + .pdf are tracked)
+*.aux
+*.fdb_latexmk
+*.fls
+*.out
+*.toc
+*.xdv
+
 # Python
 __pycache__/
 *.py[cod]

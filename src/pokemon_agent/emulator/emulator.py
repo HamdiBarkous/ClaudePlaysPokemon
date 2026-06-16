@@ -2,9 +2,9 @@ import concurrent.futures
 import logging
 import os
 import threading
-import heapq
 
 from pokemon_agent.emulator.memory_reader import PokemonRedReader, StatusCondition
+from pokemon_agent.emulator.world_map import PLAYER_COL, PLAYER_ROW, WorldMap
 from PIL import Image
 from pyboy import PyBoy
 
@@ -23,6 +23,8 @@ SETTLE_TIMEOUT_FRAMES = 400   # ceiling: must exceed the longest legitimate wait
                               # busy states (cutscene walks, battle intros) hit it
 CONTINUE_ARROW_TILE = 0xEE    # the blinking ▼ — masked so its blink isn't "change"
 
+NAV_MAX_PRESSES = 100         # ceiling on a single navigate_to walk
+
 
 class Emulator:
     """PyBoy wrapper where a single dedicated thread owns the emulator.
@@ -35,6 +37,7 @@ class Emulator:
 
     def __init__(self, rom_path, headless=True, sound=False):
         self._headless = headless
+        self.world_map = WorldMap()
         self._stop_keepalive = threading.Event()
         self._keepalive_thread = None
         self._executor = concurrent.futures.ThreadPoolExecutor(
@@ -141,10 +144,14 @@ class Emulator:
                     results.append(f"Invalid button: {button}")
                     continue
 
+                prev_map = PokemonRedReader(self.pyboy.memory).read_map_id()
                 self.pyboy.button_press(button)
                 self._tick_impl(10)   # Press briefly
                 self.pyboy.button_release(button)
                 self._settle_impl()   # Run until the game stops reacting
+                if PokemonRedReader(self.pyboy.memory).read_map_id() != prev_map:
+                    self._wait_map_ready_impl()
+                self._update_world_map_impl()
 
                 keyframes.append(Image.fromarray(self.pyboy.screen.ndarray.copy()))
                 results.append(f"Pressed {button}")
@@ -154,14 +161,25 @@ class Emulator:
         return "\n".join(results), keyframes
 
     def _screen_mirror(self) -> bytes:
-        """wTileMap with the blinking continue-arrow masked out."""
+        """wTileMap with the blinking continue-arrow masked out, plus the
+        palette registers (BGP/OBP0/OBP1).
+
+        Palettes are how screen fades happen — the tilemap freezes during a
+        warp fade while the map is half-loaded, so without them the fade
+        looks settled and observations read torn state (new map number, old
+        coordinates).
+        """
         reader = PokemonRedReader(self.pyboy.memory)
-        return reader.read_tilemap_buffer().replace(bytes([CONTINUE_ARROW_TILE]), b"\x00")
+        tilemap = reader.read_tilemap_buffer().replace(bytes([CONTINUE_ARROW_TILE]), b"\x00")
+        palettes = bytes(
+            [self.pyboy.memory[0xFF47], self.pyboy.memory[0xFF48], self.pyboy.memory[0xFF49]]
+        )
+        return tilemap + palettes
 
     @staticmethod
     def _bottom_blank(mirror: bytes) -> bool:
         """Whether the textbox area (bottom 6 tile rows) is blank."""
-        bottom = mirror[12 * 20 :]
+        bottom = mirror[12 * 20 : 18 * 20]
         blank = sum(1 for b in bottom if b in (0x7F, 0x00))
         return blank / len(bottom) > 0.9
 
@@ -183,12 +201,65 @@ class Emulator:
             self._tick_impl(SETTLE_POLL_FRAMES)
             frames += SETTLE_POLL_FRAMES
             cur = self._screen_mirror()
-            stable = stable + 1 if (reader.is_engine_idle() and cur == prev) else 0
+            # is_player_placed: the warp fade freezes the screen (stable!)
+            # while the new map is half-loaded — don't settle inside it
+            quiet = (
+                reader.is_engine_idle()
+                and reader.is_player_placed()
+                and cur == prev
+            )
+            stable = stable + 1 if quiet else 0
             prev = cur
             needed = SETTLE_STABLE_BLANK if self._bottom_blank(cur) else SETTLE_STABLE_SAMPLES
             if stable >= needed:
                 return
         logger.info(f"[Emulator] Settle timeout after {frames} frames (game busy)")
+
+    def _wait_map_ready_impl(self) -> None:
+        """After a map change, run until the warp transition fully completes.
+
+        The fade can outlive the settle (a frozen screen looks settled while
+        the new map is half-loaded: map number updated, player coordinates
+        and map header still the old map's). Joypad input is disabled for
+        the whole transition, so run until it's re-enabled and the player is
+        placed — or a dialog opens, meaning a script took over (scripted map
+        entries like first entering Oak's Lab).
+        """
+        reader = PokemonRedReader(self.pyboy.memory)
+        frames = 0
+        while frames < SETTLE_TIMEOUT_FRAMES:
+            if reader.read_dialog():
+                return
+            if reader.read_joy_ignore() == 0 and reader.is_player_placed():
+                return
+            self._tick_impl(SETTLE_POLL_FRAMES)
+            frames += SETTLE_POLL_FRAMES
+        logger.info("[Emulator] Map transition still busy after wait ceiling")
+
+    def _update_world_map_impl(self) -> None:
+        """Record the visible screen into the fog-of-war map (PyBoy thread).
+
+        Skipped whenever the screen isn't a clean overworld view: text boxes
+        and menus overwrite the tile data they cover, a mid-animation engine
+        means the coordinates may not match the screen yet, and an ignored
+        joypad means a warp or script is mid-flight.
+        """
+        reader = PokemonRedReader(self.pyboy.memory)
+        if not reader.is_engine_idle() or not reader.is_player_placed():
+            return
+        if reader.read_joy_ignore():
+            return
+        if reader.read_dialog():
+            return
+        if self._get_direction(self.pyboy.game_wrapper.game_area()) == "no direction found":
+            return
+        terrain = self._downsample_array(self.pyboy.game_wrapper.game_area_collision())
+        self.world_map.update_from_screen(
+            reader.read_map_id(),
+            reader.read_coordinates(),
+            terrain,
+            self.get_sprites(),
+        )
 
     def get_coordinates(self):
         """
@@ -254,73 +325,42 @@ class Emulator:
         # Reshape to group 2x2 blocks and take mean
         return arr.reshape(9, 2, 10, 2).mean(axis=(1, 3))
 
-    def get_collision_map(self):
+    def get_world_map_text(self):
+        """Text view of the explored map around the player, or None outside
+        the overworld (battles/menus, where map coordinates mean nothing).
+
+        Includes the fog-of-war terrain with coordinate rulers, current
+        on-screen sprites, the map's door/warp coordinates (RAM ground
+        truth), and the reachable-unexplored frontier list.
         """
-        Creates a simple ASCII map showing player position, direction, terrain and sprites.
-        Returns:
-            str: A string representation of the ASCII map with legend
-        """
-        # Snapshot terrain, movement and sprite data atomically — the
-        # game keeps running between submissions to the PyBoy thread
+        # Snapshot everything atomically — the game keeps running between
+        # submissions to the PyBoy thread
         def snapshot():
+            self._update_world_map_impl()
+            reader = PokemonRedReader(self.pyboy.memory)
             return (
                 self.pyboy.game_wrapper.game_area(),
-                self.pyboy.game_wrapper.game_area_collision(),
+                reader.read_map_id(),
+                reader.read_location(),
+                reader.read_coordinates(),
+                reader.read_warps(),
                 self.get_sprites(),
             )
 
-        full_map, collision_map, sprite_locations = self._run_on_pyboy(snapshot)
-        downsampled_terrain = self._downsample_array(collision_map)
-
-        # Get character direction from the full map
-        direction = self._get_direction(full_map)
+        area, map_id, location, pos, warps, sprites = self._run_on_pyboy(snapshot)
+        direction = self._get_direction(area)
         if direction == "no direction found":
             return None
 
-        # Direction symbols
-        direction_chars = {"up": "↑", "down": "↓", "left": "←", "right": "→"}
-        player_char = direction_chars.get(direction, "P")
-
-        # Create the ASCII map
-        horizontal_border = "+" + "-" * 10 + "+"
-        lines = [horizontal_border]
-
-        # Create each row
-        for i in range(9):
-            row = "|"
-            for j in range(10):
-                if i == 4 and j == 4:
-                    # Player position with direction
-                    row += player_char
-                elif (j, i) in sprite_locations:
-                    # Sprite position
-                    row += "S"
-                else:
-                    # Terrain representation
-                    if downsampled_terrain[i][j] == 0:
-                        row += "█"  # Wall
-                    else:
-                        row += "·"  # Path
-            row += "|"
-            lines.append(row)
-
-        # Add bottom border
-        lines.append(horizontal_border)
-
-        # Add legend
-        lines.extend(
-            [
-                "",
-                "Legend:",
-                "█ - Wall/Obstacle",
-                "· - Path/Walkable",
-                "S - Sprite",
-                f"{direction_chars['up']}/{direction_chars['down']}/{direction_chars['left']}/{direction_chars['right']} - Player (facing direction)",
-            ]
+        px, py = pos
+        sprites_global = {
+            (px + col - PLAYER_COL, py + row - PLAYER_ROW)
+            for col, row in sprites
+            if (col, row) != (PLAYER_COL, PLAYER_ROW)
+        }
+        return self.world_map.render(
+            map_id, location, pos, direction, warps, sprites_global
         )
-
-        # Join all lines with newlines
-        return "\n".join(lines)
 
     def get_valid_moves(self):
         """
@@ -348,48 +388,6 @@ class Emulator:
             valid_moves.append("right")
 
         return valid_moves
-
-    def _can_move_between_tiles(self, tile1: int, tile2: int, tileset: str) -> bool:
-        """
-        Check if movement between two tiles is allowed based on tile pair collision data.
-
-        Args:
-            tile1: The tile being moved from
-            tile2: The tile being moved to
-            tileset: The current tileset name
-
-        Returns:
-            bool: True if movement is allowed, False if blocked
-        """
-        # Tile pair collision data
-        TILE_PAIR_COLLISIONS_LAND = [
-            ("CAVERN", 288, 261),
-            ("CAVERN", 321, 261),
-            ("FOREST", 304, 302),
-            ("CAVERN", 298, 261),
-            ("CAVERN", 261, 289),
-            ("FOREST", 338, 302),
-            ("FOREST", 341, 302),
-            ("FOREST", 342, 302),
-            ("FOREST", 288, 302),
-            ("FOREST", 350, 302),
-            ("FOREST", 351, 302),
-        ]
-
-        TILE_PAIR_COLLISIONS_WATER = [
-            ("FOREST", 276, 302),
-            ("FOREST", 328, 302),
-            ("CAVERN", 276, 261),
-        ]
-
-        # Check both land and water collisions
-        for ts, t1, t2 in TILE_PAIR_COLLISIONS_LAND + TILE_PAIR_COLLISIONS_WATER:
-            if ts == tileset:
-                # Check both directions since collisions are bidirectional
-                if (tile1 == t1 and tile2 == t2) or (tile1 == t2 and tile2 == t1):
-                    return False
-
-        return True
 
     def get_sprites(self, debug=False):
         """
@@ -446,163 +444,88 @@ class Emulator:
 
         return bottom_sprite_tiles
 
-    def find_path(self, target_row: int, target_col: int) -> tuple[str, list[str]]:
-        """
-        Finds the most efficient path from the player's current position (4,4) to the target position.
-        If the target is unreachable, finds path to nearest accessible spot.
-        Allows ending on a wall tile if that's the target.
-        Takes into account terrain, sprite collisions, and tile pair collisions.
+    def navigate_to_global(self, x: int, y: int) -> tuple[str, list]:
+        """Walk to global map coordinate (x, y) over explored terrain.
 
-        Args:
-            target_row: Row index in the 9x10 downsampled map (0-8)
-            target_col: Column index in the 9x10 downsampled map (0-9)
+        Plans over the fog-of-war world map, then walks one step at a time,
+        verifying each move against RAM and re-planning around surprises the
+        collision data can't see (moving NPCs, ledges, spin tiles). Stops
+        early when a warp triggers or something appears on screen.
 
         Returns:
-            tuple[str, list[str]]: Status message and sequence of movements
+            tuple[str, list[Image.Image]]: Result text and per-step keyframes.
         """
-        # Snapshot collision map, terrain, sprites, and tileset atomically
-        def snapshot():
+        def read_state():
+            reader = PokemonRedReader(self.pyboy.memory)
             return (
-                self.pyboy.game_wrapper.game_area_collision(),
-                self.get_sprites(),
-                self.pyboy.game_wrapper._get_screen_background_tilemap(),
-                PokemonRedReader(self.pyboy.memory).read_tileset(),
+                reader.read_map_id(),
+                reader.read_coordinates(),
+                bool(reader.read_dialog()),
             )
 
-        collision_map, sprite_locations, full_map, tileset = self._run_on_pyboy(snapshot)
-        terrain = self._downsample_array(collision_map)
-
-        # Start at player position (always 4,4 in the 9x10 grid)
-        start = (4, 4)
-        end = (target_row, target_col)
-
-        # Validate target position
-        if not (0 <= target_row < 9 and 0 <= target_col < 10):
-            return "Invalid target coordinates", []
-
-        # A* algorithm
-        def heuristic(a, b):
-            return abs(a[0] - b[0]) + abs(a[1] - b[1])
-
-        open_set = []
-        heapq.heappush(open_set, (0, start))
-        came_from = {}
-        g_score = {start: 0}
-        f_score = {start: heuristic(start, end)}
-
-        # Track closest reachable point
-        closest_point = start
-        min_distance = heuristic(start, end)
-
-        def reconstruct_path(current):
-            path = []
-            while current in came_from:
-                prev = came_from[current]
-                if prev[0] < current[0]:
-                    path.append("down")
-                elif prev[0] > current[0]:
-                    path.append("up")
-                elif prev[1] < current[1]:
-                    path.append("right")
-                else:
-                    path.append("left")
-                current = prev
-            path.reverse()
-            return path
-
-        while open_set:
-            _, current = heapq.heappop(open_set)
-
-            # Check if we've reached target
-            if current == end:
-                path = reconstruct_path(current)
-                is_wall = terrain[end[0]][end[1]] == 0
-                if is_wall:
-                    return (
-                        f"Partial Success: Your target location is a wall. In case this is intentional, attempting to navigate there.",
-                        path,
-                    )
-                else:
-                    return (
-                        f"Success: Found path to target at ({target_row}, {target_col}).",
-                        path,
-                    )
-
-            # Track closest point
-            current_distance = heuristic(current, end)
-            if current_distance < min_distance:
-                closest_point = current
-                min_distance = current_distance
-
-            # If we're next to target and target is a wall, we can end here
-            if (abs(current[0] - end[0]) + abs(current[1] - end[1])) == 1 and terrain[
-                end[0]
-            ][end[1]] == 0:
-                path = reconstruct_path(current)
-                # Add final move onto wall
-                if end[0] > current[0]:
-                    path.append("down")
-                elif end[0] < current[0]:
-                    path.append("up")
-                elif end[1] > current[1]:
-                    path.append("right")
-                else:
-                    path.append("left")
+        def arrived_message():
+            warps = self._run_on_pyboy(
+                lambda: PokemonRedReader(self.pyboy.memory).read_warps()
+            )
+            if (x, y) in warps:
+                # Exit mats inside buildings only trigger when you step off
+                # them toward the map edge
                 return (
-                    f"Success: Found path to position adjacent to wall at ({target_row}, {target_col}).",
-                    path,
+                    f"Arrived at ({x}, {y}) — standing on the door/warp tile. "
+                    "If nothing happened, step once more toward the exit "
+                    "(usually down) to go through."
                 )
+            return f"Arrived at ({x}, {y})."
 
-            # Check all four directions
-            for dr, dc, direction in [
-                (1, 0, "down"),
-                (-1, 0, "up"),
-                (0, 1, "right"),
-                (0, -1, "left"),
-            ]:
-                neighbor = (current[0] + dr, current[1] + dc)
-
-                # Check bounds
-                if not (0 <= neighbor[0] < 9 and 0 <= neighbor[1] < 10):
-                    continue
-                # Skip walls unless it's the final destination
-                if terrain[neighbor[0]][neighbor[1]] == 0 and neighbor != end:
-                    continue
-                # Skip sprites unless it's the final destination
-                if (neighbor[1], neighbor[0]) in sprite_locations and neighbor != end:
-                    continue
-
-                # Check tile pair collisions
-                # Get bottom-left tile of each 2x2 block
-                current_tile = full_map[current[0] * 2 + 1][
-                    current[1] * 2
-                ]  # Bottom-left tile of current block
-                neighbor_tile = full_map[neighbor[0] * 2 + 1][
-                    neighbor[1] * 2
-                ]  # Bottom-left tile of neighbor block
-                if not self._can_move_between_tiles(
-                    current_tile, neighbor_tile, tileset
-                ):
-                    continue
-
-                tentative_g_score = g_score[current] + 1
-                if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
-                    came_from[neighbor] = current
-                    g_score[neighbor] = tentative_g_score
-                    f_score[neighbor] = tentative_g_score + heuristic(neighbor, end)
-                    heapq.heappush(open_set, (f_score[neighbor], neighbor))
-
-        # If target unreachable, return path to closest point
-        if closest_point != start:
-            path = reconstruct_path(closest_point)
+        start_map, pos, dialog = self._run_on_pyboy(read_state)
+        if dialog:
             return (
-                f"Partial Success: Could not reach the exact target, but found a path to the closest reachable point.",
-                path,
+                "Can't walk right now — there's a dialog, menu, or battle on "
+                "screen. Deal with it first (press_buttons).",
+                [],
             )
-
+        keyframes = []
+        blocked: set = set()
+        for _ in range(NAV_MAX_PRESSES):
+            if pos == (x, y):
+                return arrived_message(), keyframes
+            path, bump = self.world_map.find_path(start_map, pos, (x, y), blocked)
+            if not path:
+                where = f"stopped at {pos}" if keyframes else f"you are at {pos}"
+                return (
+                    f"No walkable route to ({x}, {y}) through explored terrain — "
+                    f"{where}. Explore toward it first, or pick a reachable target.",
+                    keyframes,
+                )
+            step = path[0]
+            _, kfs = self.press_buttons([step])
+            keyframes.extend(kfs)
+            new_map, new_pos, dialog = self._run_on_pyboy(read_state)
+            if new_map != start_map:
+                return (
+                    f"Walked through a door/warp at {pos} into a new area; "
+                    "navigation stopped there.",
+                    keyframes,
+                )
+            if dialog:
+                return (
+                    f"Navigation interrupted at {new_pos} — something came up "
+                    "on screen (dialog or battle).",
+                    keyframes,
+                )
+            if new_pos == pos:
+                if bump and len(path) == 1:
+                    return (
+                        f"Standing next to ({x}, {y}) and facing it — the tile "
+                        "itself is blocked (a person or obstacle).",
+                        keyframes,
+                    )
+                blocked.add((pos, step))
+            pos = new_pos
         return (
-            "Failure: No path is visible to the chosen location. You may need to explore a totally different path to get where you're trying to go.",
-            [],
+            f"Stopped after {NAV_MAX_PRESSES} steps without reaching ({x}, {y}); "
+            f"currently at {pos}.",
+            keyframes,
         )
 
     def get_state_from_memory(self) -> str:

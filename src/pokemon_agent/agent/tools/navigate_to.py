@@ -1,4 +1,4 @@
-"""Tool for automatic pathfinding navigation in the overworld."""
+"""Tool for walking automatically to any explored coordinate on the map."""
 
 import logging
 from typing import Annotated
@@ -19,18 +19,23 @@ def navigate_to(
         "conversational sentences reacting to what's on screen and where you're "
         "heading. Spoken via text-to-speech: no technical jargon, no coordinates.",
     ],
-    row: Annotated[int, "The row coordinate to navigate to (0-8)."],
-    col: Annotated[int, "The column coordinate to navigate to (0-9)."],
+    x: Annotated[int, "Target x coordinate, as labeled on the explored map."],
+    y: Annotated[int, "Target y coordinate, as labeled on the explored map."],
     state: Annotated[dict, InjectedState],
 ) -> dict:
-    """Automatically navigate to a position on the map grid, narrating as you play.
+    """Walk automatically to (x, y) on the current map, narrating as you play.
 
-    The screen is divided into a 9x10 grid, with the top-left corner as (0, 0).
-    This tool is only available in the overworld.
+    Uses the map coordinates shown in observations — the explored map's
+    rulers, the doors/warps list, and the unexplored-spots list all use the
+    same (x, y) system. The walk follows explored terrain, can go far beyond
+    the visible screen, and routes around obstacles on its own. Targeting a
+    door/warp walks through it; targeting a person/object walks up and faces
+    it. Only works in the overworld, within the current map.
 
-    Returns the navigation result along with a screenshot of the screen
-    afterwards, game state information read from memory, and a collision map
-    of the visible area.
+    Prefer this over press_buttons for any trip longer than a few steps.
+
+    Returns the navigation result along with screenshots from the walk, game
+    state information read from memory, and the explored map afterwards.
     """
     emulator = state["emulator"]
     logger.info(f"[Say] {say}")
@@ -40,17 +45,10 @@ def navigate_to(
     if speaker is not None:
         speaker.submit(say).wait_started()
 
-    logger.info(f"[Navigation] Navigating to: ({row}, {col})")
+    logger.info(f"[Navigation] Navigating to ({x}, {y})")
 
-    status, path = emulator.find_path(row, col)
-    keyframes = []
-    if path:
-        for direction in path:
-            _, kfs = emulator.press_buttons([direction])
-            keyframes.extend(kfs)
-        result = f"Navigation successful: followed path with {len(path)} steps"
-    else:
-        result = f"Navigation failed: {status}"
+    result, keyframes = emulator.navigate_to_global(x, y)
+    logger.info(f"[Navigation] {result}")
 
     return {
         "result": f"Navigation result: {result}",

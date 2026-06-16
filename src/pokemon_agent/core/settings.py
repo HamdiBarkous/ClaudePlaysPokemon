@@ -49,7 +49,7 @@ class Settings(BaseSettings):
         description="Model for gameplay decisions",
     )
     summarizer_model: str = Field(
-        default="",
+        default="google/gemini-3-flash-preview",
         description="Model for history summarization (empty = use game_model)",
     )
     temperature: float = Field(
@@ -95,8 +95,11 @@ class Settings(BaseSettings):
         ),
     )
     use_navigator: bool = Field(
-        default=False,
-        description="Expose the navigate_to pathfinding tool to the agent",
+        default=True,
+        description=(
+            "Expose the navigate_to tool (A* walking to any explored map "
+            "coordinate, far beyond the visible screen)"
+        ),
     )
     max_keyframes: int = Field(
         default=8,
