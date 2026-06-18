@@ -50,5 +50,5 @@ def press_buttons(
 
     return {
         "result": result,
-        **observe_after_action(emulator, keyframes),
+        **observe_after_action(emulator, keyframes, state.get("chat")),
     }

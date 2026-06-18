@@ -135,6 +135,15 @@ class Settings(BaseSettings):
         description="Cartesia TTS model",
     )
 
+    # Twitch chat (read-only). Empty channel = chat disabled.
+    twitch_channel: str = Field(
+        default="",
+        description=(
+            "Twitch channel whose chat is read (anonymously) and shown to the "
+            "agent. Empty disables chat."
+        ),
+    )
+
     @property
     def api_key(self) -> str:
         """Get the OpenRouter API key."""

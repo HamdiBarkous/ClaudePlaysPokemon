@@ -32,6 +32,7 @@ faulthandler.register(signal.SIGUSR1)
 from langgraph.errors import GraphRecursionError
 
 from pokemon_agent.agent import build_game_graph, build_initial_messages
+from pokemon_agent.chat import TwitchChat
 from pokemon_agent.core import get_settings
 from pokemon_agent.emulator import Emulator
 from pokemon_agent.voice import create_speaker
@@ -182,10 +183,17 @@ def main():
     graph = build_game_graph(session_id=session_id)
     speaker = create_speaker(settings)
 
+    chat = None
+    if settings.twitch_channel:
+        chat = TwitchChat(settings.twitch_channel)
+        chat.start()
+        logger.info(f"Reading Twitch chat from #{chat.channel}")
+
     initial_state = {
         "messages": build_initial_messages(emulator),
         "emulator": emulator,
         "speaker": speaker,
+        "chat": chat,
         "max_steps": args.steps,
         "max_history_tokens": args.max_history_tokens,
         "step_count": 0,
@@ -218,6 +226,8 @@ def main():
         except Exception as e:
             logger.error(f"Failed to save game state: {e}")
         speaker.stop()
+        if chat is not None:
+            chat.stop()
         emulator.stop()
 
 

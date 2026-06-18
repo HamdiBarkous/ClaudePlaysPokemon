@@ -52,5 +52,5 @@ def navigate_to(
 
     return {
         "result": f"Navigation result: {result}",
-        **observe_after_action(emulator, keyframes),
+        **observe_after_action(emulator, keyframes, state.get("chat")),
     }
