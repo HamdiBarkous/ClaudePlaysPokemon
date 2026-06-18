@@ -25,6 +25,8 @@ CONTINUE_ARROW_TILE = 0xEE    # the blinking ▼ — masked so its blink isn't "
 
 NAV_MAX_PRESSES = 100         # ceiling on a single navigate_to walk
 
+VALID_BUTTONS = ("a", "b", "start", "select", "up", "down", "left", "right")
+
 
 class Emulator:
     """PyBoy wrapper where a single dedicated thread owns the emulator.
@@ -127,38 +129,72 @@ class Emulator:
     def press_buttons(self, buttons):
         """Press a sequence of buttons on the Game Boy, settling after each.
 
+        Stops early — without pressing the rest — if a press lands the game on
+        a decision point: a menu/choice box opens (after an A or START press), a
+        battle starts, or the player warps to a new map. This keeps a blind
+        button batch from mashing through a screen it couldn't see yet — the
+        classic failure where A x8 overshoots the name menu and types "AAAAAAA".
+        The model gets the new screen and chooses its next press deliberately.
+
         Args:
             buttons (list[str]): List of buttons to press in sequence
 
         Returns:
-            tuple[str, list[Image.Image]]: Result text and one keyframe per
-            press, captured after that press settled (the last one is the
-            current state). Lets the model see what happened inside a batch
-            instead of only the end state.
+            tuple[str, list[Image.Image]]: A result line (noting any early stop)
+            and one keyframe per executed press, captured after that press
+            settled (the last one is the current state). Lets the model see what
+            happened inside a batch instead of only the end state.
         """
         def impl():
-            results = []
+            reader = PokemonRedReader(self.pyboy.memory)
+            pressed = []
             keyframes = []
-            for button in buttons:
-                if button not in ["a", "b", "start", "select", "up", "down", "left", "right"]:
-                    results.append(f"Invalid button: {button}")
+            stop_reason = None
+            for i, button in enumerate(buttons):
+                if button not in VALID_BUTTONS:
                     continue
 
-                prev_map = PokemonRedReader(self.pyboy.memory).read_map_id()
+                prev_map = reader.read_map_id()
+                was_in_battle = reader.is_in_battle()
+
                 self.pyboy.button_press(button)
                 self._tick_impl(10)   # Press briefly
                 self.pyboy.button_release(button)
                 self._settle_impl()   # Run until the game stops reacting
-                if PokemonRedReader(self.pyboy.memory).read_map_id() != prev_map:
+
+                warped = reader.read_map_id() != prev_map
+                if warped:
                     self._wait_map_ready_impl()
                 self._update_world_map_impl()
 
                 keyframes.append(Image.fromarray(self.pyboy.screen.ndarray.copy()))
-                results.append(f"Pressed {button}")
-            return results, keyframes
+                pressed.append(button)
 
-        results, keyframes = self._run_on_pyboy(impl)
-        return "\n".join(results), keyframes
+                # Decision-point early-exit: hand control back rather than press
+                # pre-planned buttons into a screen the model hasn't seen. Only
+                # matters while presses remain. A menu transition is gated on the
+                # A/START press that could have opened it, so directional cursor
+                # moves within a menu still batch.
+                if i < len(buttons) - 1:
+                    if warped:
+                        stop_reason = "you went through to a new area"
+                    elif reader.is_in_battle() and not was_in_battle:
+                        stop_reason = "a battle started"
+                    elif button in ("a", "start") and reader.is_menu_open():
+                        stop_reason = "a menu opened"
+                    if stop_reason:
+                        break
+
+            return pressed, stop_reason, keyframes
+
+        pressed, stop_reason, keyframes = self._run_on_pyboy(impl)
+        result = f"Pressed: {', '.join(pressed) if pressed else '(none)'}"
+        if stop_reason:
+            result += (
+                f". Stopped early — {stop_reason}, so the remaining presses were "
+                "skipped. Look at the screen now and decide your next move."
+            )
+        return result, keyframes
 
     def _screen_mirror(self) -> bytes:
         """wTileMap with the blinking continue-arrow masked out, plus the

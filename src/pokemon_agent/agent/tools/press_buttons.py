@@ -46,9 +46,9 @@ def press_buttons(
 
     logger.info(f"[Buttons] Pressing: {buttons}")
 
-    _, keyframes = emulator.press_buttons(buttons)
+    result, keyframes = emulator.press_buttons(buttons)
 
     return {
-        "result": f"Pressed buttons: {', '.join(buttons)}",
+        "result": result,
         **observe_after_action(emulator, keyframes),
     }

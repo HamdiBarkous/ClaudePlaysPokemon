@@ -1074,6 +1074,21 @@ class PokemonRedReader:
         """
         return bytes(self.memory[0xC3A0:0xC508])
 
+    def is_menu_open(self) -> bool:
+        """Whether a menu/choice box is on screen (the ► selection cursor).
+
+        The cursor is font tile 0xED, drawn only when a menu is waiting for a
+        selection. Plain dialog uses the ▼ continue arrow (0xEE) and overworld
+        terrain never uses font tiles, so 0xED reliably means "a menu is open"
+        — the name-entry keyboard, yes/no boxes, the START menu, shops, and the
+        battle command menu all qualify.
+        """
+        return 0xED in self.read_tilemap_buffer()
+
+    def is_in_battle(self) -> bool:
+        """Whether a battle is currently active (wIsInBattle at 0xD057)."""
+        return self.memory[0xD057] != 0
+
     def read_item_count(self) -> int:
         """Read number of items in inventory"""
         return self.memory[0xD31D]
