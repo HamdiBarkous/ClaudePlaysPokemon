@@ -1,6 +1,7 @@
 import concurrent.futures
 import logging
 import os
+import sys
 import threading
 
 from pokemon_agent.emulator.memory_reader import PokemonRedReader, StatusCondition
@@ -50,8 +51,11 @@ class Emulator:
         def construct():
             if headless:
                 return PyBoy(rom_path, window="null", cgb=True)
-            # XWayland tolerates threaded SDL rendering better than Wayland
-            os.environ.setdefault("SDL_VIDEODRIVER", "x11")
+            # On Linux/WSL, XWayland tolerates threaded SDL rendering better
+            # than Wayland. Don't force this on Windows/macOS — there is no x11
+            # driver there, so it leaves SDL unable to open a window.
+            if sys.platform == "linux":
+                os.environ.setdefault("SDL_VIDEODRIVER", "x11")
             return PyBoy(rom_path, cgb=True, sound=sound)
 
         self.pyboy = self._executor.submit(construct).result()

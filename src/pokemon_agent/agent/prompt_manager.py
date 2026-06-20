@@ -35,7 +35,7 @@ class PromptManager:
         """
         env = PromptManager._get_env(message_type)
         template_path = f"{template}.j2"
-        with open(env.loader.get_source(env, template_path)[1]) as file:  # type: ignore
+        with open(env.loader.get_source(env, template_path)[1], encoding="utf-8") as file:  # type: ignore
             post = frontmatter.load(file)
         jinja_template = env.from_string(post.content)
         try:
@@ -58,7 +58,7 @@ class PromptManager:
         """Get metadata about a template."""
         env = PromptManager._get_env(message_type)
         template_path = f"{template}.j2"
-        with open(env.loader.get_source(env, template_path)[1]) as file:  # type: ignore
+        with open(env.loader.get_source(env, template_path)[1], encoding="utf-8") as file:  # type: ignore
             post = frontmatter.load(file)
         ast = env.parse(post.content)
         variables = meta.find_undeclared_variables(ast)

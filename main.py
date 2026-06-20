@@ -26,8 +26,10 @@ import re
 import signal
 from datetime import datetime
 
-# `kill -USR1 <pid>` dumps all thread stacks — for diagnosing a stuck run
-faulthandler.register(signal.SIGUSR1)
+# `kill -USR1 <pid>` dumps all thread stacks — for diagnosing a stuck run.
+# Unix-only: faulthandler.register and signal.SIGUSR1 don't exist on Windows.
+if hasattr(faulthandler, "register") and hasattr(signal, "SIGUSR1"):
+    faulthandler.register(signal.SIGUSR1)
 
 from langgraph.errors import GraphRecursionError
 

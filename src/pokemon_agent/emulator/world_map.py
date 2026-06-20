@@ -271,11 +271,11 @@ class WorldMap:
                 str(map_id): {f"{x},{y}": ch for (x, y), ch in tiles.items()}
                 for map_id, tiles in self._maps.items()
             }
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump({"maps": data}, f)
 
     def load(self, path) -> None:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         maps = {}
         for map_id, tiles in data.get("maps", {}).items():
